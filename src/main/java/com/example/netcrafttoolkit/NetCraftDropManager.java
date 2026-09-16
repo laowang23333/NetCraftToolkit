@@ -9,6 +9,7 @@ import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraftforge.event.entity.living.LivingDropsEvent;
+import net.minecraftforge.eventbus.api.EventPriority;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.registries.ForgeRegistries;
 
@@ -136,7 +137,7 @@ public class NetCraftDropManager {
     /**
      * 处理生物死亡掉落。
      */
-    @SubscribeEvent
+    @SubscribeEvent(priority = EventPriority.LOWEST)
     public void onLivingDrops(LivingDropsEvent event) {
 
         LivingEntity entity = event.getEntity();
@@ -170,9 +171,29 @@ public class NetCraftDropManager {
 
         DropConfig config = dropConfigs.get(entityId);
 
+        NetCraftToolkit.LOGGER.info(
+                "[NetCraftToolkit] Drop event: entity={}, configured={}, existingDrops={}",
+                entityId,
+                config != null,
+                event.getDrops().size()
+        );
+
         if (config == null || config.entries().isEmpty()) {
+            if (config == null) {
+                NetCraftToolkit.LOGGER.info(
+                        "[NetCraftToolkit] No custom drop config for {}.",
+                        entityId
+                );
+            }
             return;
         }
+
+        NetCraftToolkit.LOGGER.info(
+                "[NetCraftToolkit] Custom drops matched: entity={}, replace={}, entries={}",
+                entityId,
+                config.replaceDrops(),
+                config.entries().size()
+        );
 
         /*
          * 先验证配置里至少有一个可以实际生成的物品。
@@ -209,7 +230,13 @@ public class NetCraftDropManager {
          * 只有确认至少有一个有效自定义物品后才清空原始掉落。
          */
         if (config.replaceDrops()) {
+            int originalCount = event.getDrops().size();
             event.getDrops().clear();
+            NetCraftToolkit.LOGGER.info(
+                    "[NetCraftToolkit] Original drops cleared for {}: {} -> 0",
+                    entityId,
+                    originalCount
+            );
         }
 
         /*
@@ -235,11 +262,19 @@ public class NetCraftDropManager {
             double chance = entry.chance();
 
             if (chance <= 0.0D) {
+                NetCraftToolkit.LOGGER.info(
+                        "[NetCraftToolkit] Drop skipped: entity={}, item={}, chance={}",
+                        entityId, entry.itemId(), chance
+                );
                 continue;
             }
 
             if (chance < 1.0D) {
-                if (ThreadLocalRandom.current().nextDouble() > chance) {
+                if (ThreadLocalRandom.current().nextDouble() >= chance) {
+                    NetCraftToolkit.LOGGER.info(
+                            "[NetCraftToolkit] Drop chance failed: entity={}, item={}, chance={}",
+                            entityId, entry.itemId(), chance
+                    );
                     continue;
                 }
             }
@@ -271,7 +306,8 @@ public class NetCraftDropManager {
 
             if (item == null) {
                 NetCraftToolkit.LOGGER.warn(
-                        "[NetCraftToolkit] Unknown drop item: {}",
+                        "[NetCraftToolkit] Unknown drop item for {}: {}",
+                        entityId,
                         entry.itemId()
                 );
                 continue;
@@ -280,6 +316,14 @@ public class NetCraftDropManager {
             ItemStack stack = new ItemStack(item, amount);
 
             spawnDrop(entity, stack, event);
+
+            NetCraftToolkit.LOGGER.info(
+                    "[NetCraftToolkit] Custom drop added: entity={}, item={}, amount={}, eventDropsNow={}",
+                    entityId,
+                    entry.itemId(),
+                    amount,
+                    event.getDrops().size()
+            );
         }
     }
 
