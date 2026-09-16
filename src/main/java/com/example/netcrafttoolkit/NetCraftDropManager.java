@@ -2,12 +2,14 @@ package com.example.netcrafttoolkit;
 
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.resources.ResourceLocation;
+import net.minecraft.world.phys.AABB;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraftforge.event.entity.EntityJoinLevelEvent;
 import net.minecraftforge.event.entity.living.LivingDeathEvent;
+import net.minecraftforge.event.TickEvent;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraftforge.event.entity.living.LivingDropsEvent;
@@ -299,6 +301,69 @@ public class NetCraftDropManager {
             );
 
             return;
+        }
+    }
+
+    /**
+     * 兜底拦截 Boss 原始掉落。
+     *
+     * EntityJoinLevelEvent 在部分模组/特殊生成路径下可能无法可靠覆盖
+     * 所有直接 addFreshEntity 的物品，因此这里再用服务器 Tick 做一次短窗口扫描。
+     *
+     * 只扫描刚刚死亡的 NetCraft 实体附近，不会全局删除物品。
+     */
+    @SubscribeEvent
+    public void onServerTick(TickEvent.ServerTickEvent event) {
+        if (event == null || event.phase != TickEvent.Phase.END) {
+            return;
+        }
+
+        if (suppressionWindows.isEmpty()) {
+            return;
+        }
+
+        for (Map.Entry<UUID, SuppressionWindow> entry : suppressionWindows.entrySet()) {
+            SuppressionWindow window = entry.getValue();
+
+            if (window == null) {
+                suppressionWindows.remove(entry.getKey(), null);
+                continue;
+            }
+
+            ServerLevel level = window.level();
+            long now = level.getGameTime();
+
+            if (now > window.expireTick()) {
+                suppressionWindows.remove(entry.getKey(), window);
+                continue;
+            }
+
+            AABB box = new AABB(
+                    window.x() - 4.0D,
+                    window.y() - 4.0D,
+                    window.z() - 4.0D,
+                    window.x() + 4.0D,
+                    window.y() + 4.0D,
+                    window.z() + 4.0D
+            );
+
+            List<ItemEntity> nearby = level.getEntitiesOfClass(
+                    ItemEntity.class,
+                    box,
+                    itemEntity -> !itemEntity.getPersistentData().getBoolean(CUSTOM_DROP_TAG)
+                            && !hasThrower(itemEntity)
+            );
+
+            for (ItemEntity itemEntity : nearby) {
+                NetCraftToolkit.LOGGER.info(
+                        "[NetCraftToolkit] Removed Boss original drop by tick sweep: item={}, pos=({}, {}, {})",
+                        itemEntity.getItem().getItem(),
+                        itemEntity.getX(),
+                        itemEntity.getY(),
+                        itemEntity.getZ()
+                );
+                itemEntity.discard();
+            }
         }
     }
 
