@@ -35,7 +35,7 @@ import java.util.regex.Pattern;
  * 2. 玩家称号持有列表。
  * 3. 称号选择状态。
  * 4. 自定义称号文本持久化。
- * 5. T|uuid|文本 / S|uuid|文本 / uuid|文本 三种旧格式兼容。
+ * 5. O|uuid|称号ID / T|uuid|主称号ID / S|uuid|副称号ID，兼容旧 uuid|文本 格式。
  * 6. §0-§f、§k-§o、§r。
  * 7. &0-&f、&k-&o、&r。
  * 8. &#RRGGBB / &x&R&R&G&G&B&B。
@@ -178,6 +178,30 @@ public class TitleManager {
                     new ArrayList<>();
 
             /*
+             * O = 玩家拥有的全部称号。
+             *
+             * 这是持有列表的持久化数据，不能只保存当前主/副称号。
+             * 否则一个没有装备的称号重启后就会从 GUI 中消失。
+             */
+            for (Map.Entry<UUID, LinkedHashSet<String>> entry :
+                    playerTitles.entrySet()) {
+
+                UUID uuid = entry.getKey();
+                for (String titleId : entry.getValue()) {
+                    if (titleId == null || titleId.isBlank()) {
+                        continue;
+                    }
+
+                    lines.add(
+                            "O|"
+                                    + uuid
+                                    + "|"
+                                    + escapeLine(titleId)
+                    );
+                }
+            }
+
+            /*
              * T = 主称号。
              */
             for (Map.Entry<UUID, String> entry :
@@ -306,11 +330,13 @@ public class TitleManager {
             /*
              * 新格式：
              *
-             * T|uuid|主称号
-             * S|uuid|副称号
+             * O|uuid|称号ID
+             * T|uuid|主称号ID
+             * S|uuid|副称号ID
              */
             if (parts.length >= 3
-                    && ("T".equalsIgnoreCase(parts[0])
+                    && ("O".equalsIgnoreCase(parts[0])
+                    || "T".equalsIgnoreCase(parts[0])
                     || "S".equalsIgnoreCase(parts[0]))) {
 
                 UUID uuid =
@@ -323,11 +349,12 @@ public class TitleManager {
                     return;
                 }
 
+                // O 只表示“拥有”，不改变当前主/副称号。
                 addOwnedTitle(uuid, title);
 
                 if ("T".equalsIgnoreCase(parts[0])) {
                     mainTitles.put(uuid, title);
-                } else {
+                } else if ("S".equalsIgnoreCase(parts[0])) {
                     subTitles.put(uuid, title);
                 }
 
@@ -757,6 +784,32 @@ public class TitleManager {
         }
     }
 
+    /**
+     * 玩家重新进入世界后重新应用称号。
+     *
+     * 这样不会依赖客户端缓存，登录、重生、跨维度后都能立即恢复。
+     */
+    @SubscribeEvent
+    public void onPlayerLoggedIn(PlayerEvent.PlayerLoggedInEvent event) {
+        if (event.getEntity() instanceof ServerPlayer player) {
+            refreshPlayer(player.getUUID());
+        }
+    }
+
+    @SubscribeEvent
+    public void onPlayerRespawn(PlayerEvent.PlayerRespawnEvent event) {
+        if (event.getEntity() instanceof ServerPlayer player) {
+            refreshPlayer(player.getUUID());
+        }
+    }
+
+    @SubscribeEvent
+    public void onPlayerChangedDimension(PlayerEvent.PlayerChangedDimensionEvent event) {
+        if (event.getEntity() instanceof ServerPlayer player) {
+            refreshPlayer(player.getUUID());
+        }
+    }
+
     /** 获取玩家当前称号显示文本（主 + 副）。 */
     private synchronized MutableComponent buildTitlePrefix(UUID uuid) {
         MutableComponent result = Component.empty();
@@ -842,11 +895,16 @@ public class TitleManager {
             player.setCustomName(name);
             player.setCustomNameVisible(true);
 
+            // NameFormat 是聊天显示名的刷新入口；不调用它时，
+            // 主/副称号切换后聊天可能继续使用旧的缓存名称，直到重进服务器。
+            player.refreshDisplayName();
+
             // Tab 列表通过 Forge 的 TabListNameFormat 事件动态提供显示名。
             player.refreshTabListName();
         } else {
             player.setCustomName(null);
             player.setCustomNameVisible(false);
+            player.refreshDisplayName();
             player.refreshTabListName();
         }
     }
