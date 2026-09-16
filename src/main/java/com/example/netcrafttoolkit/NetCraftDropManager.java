@@ -22,6 +22,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
 
@@ -60,6 +61,15 @@ public class NetCraftDropManager {
      */
     private final Map<UUID, SuppressionWindow> suppressionWindows =
             new ConcurrentHashMap<>();
+
+    /**
+     * Toolkit 自己生成的掉落物 UUID。
+     *
+     * 仅靠 PersistentData 标记在某些实体加入世界/模组处理链路中不够稳妥，
+     * 因此再用 UUID 做一层绝对放行。
+     */
+    private final Set<UUID> customDropEntities =
+            ConcurrentHashMap.newKeySet();
 
     /**
      * 自定义掉落的标记。
@@ -251,7 +261,8 @@ public class NetCraftDropManager {
         /*
          * 自定义掉落由本管理器自己生成，必须放行。
          */
-        if (itemEntity.getPersistentData().getBoolean(CUSTOM_DROP_TAG)) {
+        if (itemEntity.getPersistentData().getBoolean(CUSTOM_DROP_TAG)
+                || customDropEntities.contains(itemEntity.getUUID())) {
             return;
         }
 
@@ -351,6 +362,7 @@ public class NetCraftDropManager {
                     ItemEntity.class,
                     box,
                     itemEntity -> !itemEntity.getPersistentData().getBoolean(CUSTOM_DROP_TAG)
+                            && !customDropEntities.contains(itemEntity.getUUID())
                             && !hasThrower(itemEntity)
             );
 
@@ -582,7 +594,18 @@ public class NetCraftDropManager {
                 true
         );
 
+        /*
+         * UUID 白名单比 PersistentData 更直接：
+         * 即使 NetCraft/Forge 后续处理了实体数据，自定义掉落也不会被 Tick 兜底误删。
+         */
+        UUID customDropUuid = itemEntity.getUUID();
+        customDropEntities.add(customDropUuid);
+
         boolean added = level.addFreshEntity(itemEntity);
+
+        if (!added) {
+            customDropEntities.remove(customDropUuid);
+        }
 
         if (!added) {
             NetCraftToolkit.LOGGER.warn(
