@@ -301,12 +301,41 @@ public class NetCraftConfig {
                 );
 
                 /*
-                 * 这里不要直接在 watcher 线程操作世界实体。
-                 * 只重新读取配置。
+                 * 配置监听器运行在独立线程。
+                 *
+                 * 先重新读取配置并同步掉落配置，然后把已有实体的属性
+                 * 重新应用操作提交到 Minecraft 主线程。
+                 *
+                 * 这样修改 TOML 后，已经存在世界里的 NetCraft 生物
+                 * 也会立即使用新的属性，不需要击杀后重新生成。
                  */
                 parseConfig();
 
                 syncDropManager();
+
+                MinecraftServer currentServer = this.server;
+                if (currentServer != null) {
+                    currentServer.execute(() -> {
+                        try {
+                            NetCraftAttributeManager attributeManager =
+                                    NetCraftToolkit.getAttributeManager();
+
+                            if (attributeManager != null) {
+                                attributeManager.reloadAllEntities();
+                            }
+
+                            NetCraftToolkit.LOGGER.info(
+                                    "[NetCraftToolkit] Existing NetCraft entities updated after hot reload."
+                            );
+
+                        } catch (Throwable reloadError) {
+                            NetCraftToolkit.LOGGER.error(
+                                    "[NetCraftToolkit] Failed to update existing entities after hot reload.",
+                                    reloadError
+                            );
+                        }
+                    });
+                }
 
                 NetCraftToolkit.LOGGER.info(
                         "[NetCraftToolkit] Configuration hot reloaded."
