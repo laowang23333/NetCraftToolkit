@@ -2,19 +2,17 @@ package com.example.netcrafttoolkit;
 
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.level.ServerPlayer;
-import net.minecraft.world.Container;
 import net.minecraft.world.SimpleContainer;
 import net.minecraft.world.entity.player.Inventory;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.inventory.ChestMenu;
 import net.minecraft.world.inventory.ClickType;
 import net.minecraft.world.inventory.MenuType;
+import net.minecraft.world.inventory.Slot;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.item.enchantment.EnchantmentHelper;
 import net.minecraft.world.item.enchantment.Enchantments;
-import net.minecraft.world.item.Item;
-import net.minecraft.world.inventory.AbstractContainerMenu;
 import net.minecraft.world.SimpleMenuProvider;
 
 import java.util.ArrayList;
@@ -133,7 +131,11 @@ public class TitleMenu extends ChestMenu {
             return;
         }
 
-        // 客户端没有服务端 TitleManager，实际称号操作交给服务端菜单处理。
+        // 客户端也不能把展示图标拿到光标里；真正的称号操作由服务端菜单处理。
+        if (slotId >= 0 && slotId < SIZE && manager == null) {
+            return;
+        }
+
         if (manager == null) {
             super.clicked(slotId, dragType, clickType, clickedPlayer);
             return;
@@ -180,7 +182,24 @@ public class TitleMenu extends ChestMenu {
             return;
         }
 
+        // 称号菜单里的物品全部是展示图标/按钮，禁止拿走、丢弃、拖动或交换。
+        if (slotId >= 0 && slotId < SIZE) {
+            return;
+        }
+
         super.clicked(slotId, dragType, clickType, clickedPlayer);
+    }
+
+    @Override
+    public boolean canTakeItemForPickAll(ItemStack stack, Slot slot) {
+        return slot.container != titleContainer && super.canTakeItemForPickAll(stack, slot);
+    }
+
+    @Override
+    public void removed(Player player) {
+        // 这些图标不是玩家物品，关闭 GUI 时清空容器，绝不掉落到世界。
+        titleContainer.clearContent();
+        super.removed(player);
     }
 
     @Override

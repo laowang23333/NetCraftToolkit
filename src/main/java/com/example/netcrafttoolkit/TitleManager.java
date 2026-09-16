@@ -8,6 +8,7 @@ import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.level.storage.LevelResource;
+import net.minecraftforge.event.entity.player.PlayerEvent;
 import net.minecraftforge.event.server.ServerStoppingEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 
@@ -369,52 +370,6 @@ public class TitleManager {
         }
     }
 
-    /** 根据称号 ID 获取当前显示文本。 */
-    public synchronized String getTitleText(String titleId) {
-        if (titleId == null || titleId.isBlank()) {
-            return null;
-        }
-
-        NetCraftConfig config = NetCraftToolkit.getConfig();
-        if (config != null) {
-            String text = config.getTitleDefinitions().get(titleId);
-            if (text != null) {
-                return text;
-            }
-        }
-
-        String custom = customTitles.get(titleId);
-        if (custom != null) {
-            return custom;
-        }
-
-        // 兼容旧数据：如果存储的不是 ID 而是原始文本，则直接返回。
-        return titleId;
-    }
-
-    /** 当前配置中的称号定义。 */
-    public synchronized Map<String, String> getDefinitions() {
-        Map<String, String> result = new LinkedHashMap<>();
-        NetCraftConfig config = NetCraftToolkit.getConfig();
-        if (config != null) {
-            result.putAll(config.getTitleDefinitions());
-        }
-        result.putAll(customTitles);
-        return result;
-    }
-
-    /** 配置热重载时同步称号定义，并清理已失效的在线显示。 */
-    public synchronized void syncDefinitions(Map<String, String> definitions) {
-        if (definitions == null) {
-            return;
-        }
-        if (server != null) {
-            for (ServerPlayer player : server.getPlayerList().getPlayers()) {
-                applyName(player);
-            }
-        }
-    }
-
     /**
      * 解析自定义称号注册表。
      *
@@ -754,6 +709,50 @@ public class TitleManager {
                 && titles.contains(title);
     }
 
+    /** 获取玩家当前称号显示文本（主 + 副）。 */
+    private synchronized MutableComponent buildTitlePrefix(UUID uuid) {
+        MutableComponent result = Component.empty();
+        String mainId = mainTitles.get(uuid);
+        String subId = subTitles.get(uuid);
+        boolean has = false;
+
+        if (mainId != null && !mainId.isBlank()) {
+            String text = getTitleText(mainId);
+            if (text != null && !text.isBlank()) {
+                result.append(parseText(text));
+                has = true;
+            }
+        }
+
+        if (subId != null && !subId.isBlank()) {
+            String text = getTitleText(subId);
+            if (text != null && !text.isBlank()) {
+                if (has) result.append(Component.literal(" "));
+                result.append(parseText(text));
+                has = true;
+            }
+        }
+
+        return result;
+    }
+
+    /** 玩家称号前缀，用于聊天显示名。 */
+    @SubscribeEvent
+    public void onNameFormat(PlayerEvent.NameFormat event) {
+        if (!(event.getEntity() instanceof ServerPlayer player)) {
+            return;
+        }
+
+        MutableComponent prefix = buildTitlePrefix(player.getUUID());
+        if (prefix.getString().isEmpty()) {
+            return;
+        }
+
+        prefix.append(Component.literal(" "));
+        prefix.append(player.getName());
+        event.setDisplayname(prefix);
+    }
+
     /**
      * 刷新玩家名称显示。
      *
@@ -767,60 +766,26 @@ public class TitleManager {
             return;
         }
 
-        UUID uuid =
-                player.getUUID();
+        MutableComponent prefix = buildTitlePrefix(player.getUUID());
+        boolean hasTitle = !prefix.getString().isEmpty();
 
-        String main =
-                mainTitles.get(uuid);
+        if (hasTitle) {
+            MutableComponent name = prefix.copy();
+            name.append(Component.literal(" "));
+            name.append(player.getName());
+            player.setCustomName(name);
+            player.setCustomNameVisible(true);
 
-        String sub =
-                subTitles.get(uuid);
-
-        if ((main == null || main.isBlank())
-                && (sub == null || sub.isBlank())) {
-
+            // Tab 列表使用同一套称号显示名。
+            MutableComponent tab = prefix.copy();
+            tab.append(Component.literal(" "));
+            tab.append(player.getName());
+            player.setTabListDisplayName(tab);
+        } else {
             player.setCustomName(null);
             player.setCustomNameVisible(false);
-
-            return;
+            player.setTabListDisplayName(null);
         }
-
-        MutableComponent result =
-                Component.empty();
-
-        if (main != null
-                && !main.isBlank()) {
-
-            result.append(
-                    parseText(main)
-            );
-
-            result.append(
-                    Component.literal(" ")
-            );
-        }
-
-        if (sub != null
-                && !sub.isBlank()) {
-
-            result.append(
-                    parseText(sub)
-            );
-
-            result.append(
-                    Component.literal(" ")
-            );
-        }
-
-        result.append(
-                Component.literal(
-                        player.getGameProfile()
-                                .getName()
-                )
-        );
-
-        player.setCustomName(result);
-        player.setCustomNameVisible(true);
     }
 
     /**
