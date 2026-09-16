@@ -1259,16 +1259,24 @@ public class NetCraftConfig {
             }
 
             /*
-             * 只生成拥有标准属性数据的实体。
-             * 没有 DefaultAttributes 的 Boss 技能实体直接跳过，
-             * 不生成空的属性配置和 drops 配置。
+             * 只生成拥有标准属性、且默认最大生命值 >= 100 的实体。
+             * 低于 100 血的 NetCraft 生物不写入配置。
              */
             if (!hasReadableStandardAttributes(type)) {
                 continue;
             }
 
+            double defaultMaxHealth =
+                    getDefaultMaxHealth(type);
+
+            if (defaultMaxHealth < 100.0D) {
+                continue;
+            }
+
             /*
-             * 尝试判断分类。
+             * 判断分类。
+             * BOSS / 精英会分别写在各自标题下面，
+             * 不会全部挤在配置文件最前面。
              */
             String detectedCategory =
                     detectEntityCategory(
@@ -1391,6 +1399,32 @@ public class NetCraftConfig {
 
         } catch (Exception ignored) {
             return false;
+        }
+    }
+
+    /**
+     * 读取实体默认最大生命值。
+     * 只用于生成配置时筛选 >= 100 血的 NetCraft 生物。
+     */
+    private double getDefaultMaxHealth(
+            EntityType<?> type
+    ) {
+        try {
+            @SuppressWarnings("unchecked")
+            EntityType<? extends net.minecraft.world.entity.LivingEntity> livingType =
+                    (EntityType<? extends net.minecraft.world.entity.LivingEntity>) (EntityType<?>) type;
+
+            AttributeSupplier supplier =
+                    DefaultAttributes.getSupplier(livingType);
+
+            if (supplier == null) {
+                return 0.0D;
+            }
+
+            return supplier.getValue(Attributes.MAX_HEALTH);
+
+        } catch (Exception ignored) {
+            return 0.0D;
         }
     }
 
