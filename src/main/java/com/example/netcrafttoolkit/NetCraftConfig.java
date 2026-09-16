@@ -1665,30 +1665,28 @@ public class NetCraftConfig {
     private String readChineseNameFromLanguage(
             String translationKey
     ) {
-        if (server == null) {
-            return null;
-        }
-
         try {
-            ResourceLocation languageFile =
-                    new ResourceLocation(
-                            "netcraft",
-                            "lang/zh_cn.json"
-                    );
-
-            var resource =
-                    server.getResourceManager()
-                            .getResource(
-                                    languageFile
-                            );
-
-            if (resource.isEmpty()) {
-                return null;
-            }
-
+            /*
+             * NetCraft 的中文语言文件属于客户端 assets 资源：
+             * assets/netcraft/lang/zh_cn.json
+             *
+             * 这里不能使用 server.getResourceManager() 去读取。
+             * Dedicated Server 的 ResourceManager 主要管理 data/datapack
+             * 资源，因此会出现有时能读到、有时完全读不到中文名的情况。
+             *
+             * 直接通过当前 Mod ClassLoader 读取安装在 mods 目录中的
+             * NetCraft JAR 资源，不需要把 NetCraft JAR 加入本项目依赖。
+             */
             try (var inputStream =
-                         resource.get()
-                                 .open()) {
+                         NetCraftConfig.class
+                                 .getClassLoader()
+                                 .getResourceAsStream(
+                                         "assets/netcraft/lang/zh_cn.json"
+                                 )) {
+
+                if (inputStream == null) {
+                    return null;
+                }
 
                 String json =
                         new String(
