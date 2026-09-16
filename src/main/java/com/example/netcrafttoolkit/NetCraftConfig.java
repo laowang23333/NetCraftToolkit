@@ -469,10 +469,14 @@ public class NetCraftConfig {
         }
 
         /*
-         * Boss / Elite / Mob 生物配置。
+         * 掉落配置必须先判断。
+         *
+         * [boss."netcraft:xxx".drops] 同时满足 isEntitySection()，
+         * 如果先判断普通实体区段，replace/items 就会被当成普通属性，
+         * 导致掉落配置根本不会进入 parseDropProperty()。
          */
-        if (isEntitySection(section)) {
-            parseEntityProperty(
+        if (section.endsWith(".drops")) {
+            parseDropProperty(
                     section,
                     key,
                     value
@@ -482,10 +486,10 @@ public class NetCraftConfig {
         }
 
         /*
-         * 掉落配置。
+         * Boss / Elite / Mob 生物配置。
          */
-        if (section.endsWith(".drops")) {
-            parseDropProperty(
+        if (isEntitySection(section)) {
+            parseEntityProperty(
                     section,
                     key,
                     value
