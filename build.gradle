@@ -62,6 +62,7 @@ dependencies {
 mixin {
     add sourceSets.main, 'netcrafttoolkit.refmap.json'
     config 'netcrafttoolkit.mixins.json'
+    disableTargetValidator = true
 }
 
 
