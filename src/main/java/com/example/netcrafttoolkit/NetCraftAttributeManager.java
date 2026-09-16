@@ -1,204 +1,202 @@
 package com.example.netcrafttoolkit;
 
-import com.mojang.logging.LogUtils;
+import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.resources.ResourceLocation;
+import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.ai.attributes.Attribute;
 import net.minecraft.world.entity.ai.attributes.AttributeInstance;
 import net.minecraft.world.entity.ai.attributes.Attributes;
 import net.minecraftforge.event.entity.EntityJoinLevelEvent;
-import net.minecraftforge.eventbus.api.EventPriority;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
-import net.minecraftforge.registries.ForgeRegistries;
-import org.slf4j.Logger;
 
-import java.util.LinkedHashMap;
-import java.util.Locale;
+import java.lang.reflect.Method;
+import java.util.HashMap;
 import java.util.Map;
+import java.util.UUID;
 
+/**
+ * NetCraft 生物属性管理器。
+ *
+ * 负责：
+ *
+ * 1. 识别 netcraft: 生物。
+ * 2. 保存生物原始 Minecraft 属性。
+ * 3. 根据 NetCraftConfig 覆写属性。
+ * 4. 支持服务器启动后重新应用。
+ * 5. 支持配置热重载。
+ * 6. 自动识别 NetCraft BossBase。
+ * 7. 通过反射调用 BossBase 的真实 API。
+ *
+ * NetCraft 1.4.18 已确认：
+ *
+ * BossBase:
+ *
+ * getBaseDamage()
+ * setBaseDamage(int)
+ * getBaseDefense()
+ * setBaseDefense(int)
+ * getMeleeDefense()
+ * getRangedDefense()
+ * getMagicDefense()
+ * getDamageReductionRatio()
+ * getBossMeleeReductionRatio()
+ * getHatredManager()
+ */
 public class NetCraftAttributeManager {
 
-    private static final Logger LOGGER = LogUtils.getLogger();
-
-    private static final Map<String, Attribute> SUPPORTED_ATTRIBUTES =
-            new LinkedHashMap<>();
-
-    /*
-     * 配置文件里的名称 -> Minecraft 原版 Attribute
+    /**
+     * 支持的 Minecraft 原生属性。
      */
-    static {
-        SUPPORTED_ATTRIBUTES.put(
-                "max_health",
-                Attributes.MAX_HEALTH
-        );
+    private static final Attribute[] SUPPORTED_ATTRIBUTES = {
+            Attributes.MAX_HEALTH,
+            Attributes.ATTACK_DAMAGE,
+            Attributes.MOVEMENT_SPEED,
+            Attributes.ARMOR,
+            Attributes.ATTACK_SPEED,
+            Attributes.KNOCKBACK_RESISTANCE,
+            Attributes.FOLLOW_RANGE
+    };
 
-        SUPPORTED_ATTRIBUTES.put(
-                "attack_damage",
-                Attributes.ATTACK_DAMAGE
-        );
-
-        SUPPORTED_ATTRIBUTES.put(
-                "movement_speed",
-                Attributes.MOVEMENT_SPEED
-        );
-
-        SUPPORTED_ATTRIBUTES.put(
-                "armor",
-                Attributes.ARMOR
-        );
-
-        SUPPORTED_ATTRIBUTES.put(
-                "attack_speed",
-                Attributes.ATTACK_SPEED
-        );
-
-        SUPPORTED_ATTRIBUTES.put(
-                "knockback_resistance",
-                Attributes.KNOCKBACK_RESISTANCE
-        );
-
-        SUPPORTED_ATTRIBUTES.put(
-                "follow_range",
-                Attributes.FOLLOW_RANGE
-        );
-    }
-
-    /*
-     * 每一种 NetCraft 生物第一次出现时，
-     * 保存它真正的原始 Attribute。
+    /**
+     * 保存实体原始属性。
      *
-     * key:
-     *
-     * netcraft:xxx
-     *
-     * value:
-     *
-     * max_health -> 20
-     * attack_damage -> 5
-     * ...
+     * UUID -> 属性 -> 原始值
      */
-    private final Map<String, Map<String, Double>> baseValues =
-            new LinkedHashMap<>();
+    private final Map<UUID, Map<Attribute, Double>> baseValues =
+            new HashMap<>();
 
-    /*
-     * 防止同一个实体反复初始化。
+    /**
+     * 已初始化的实体。
      */
-    private final Map<Integer, Boolean> initializedEntities =
-            new java.util.HashMap<>();
+    private final Map<UUID, Boolean> initializedEntities =
+            new HashMap<>();
 
-    public NetCraftAttributeManager() {
-    }
-
-    /*
-     * ============================================================
-     * EntityJoin
-     * ============================================================
+    /**
+     * 防止重复刷日志。
      */
+    private final Map<String, Boolean> warned =
+            new HashMap<>();
 
-    @SubscribeEvent(priority = EventPriority.NORMAL)
+    // =========================================================
+    // Entity Join
+    // =========================================================
+
+    /**
+     * 生物进入世界时处理。
+     */
+    @SubscribeEvent
     public void onEntityJoin(
             EntityJoinLevelEvent event
     ) {
+
+        if (event == null) {
+            return;
+        }
 
         if (event.getLevel().isClientSide()) {
             return;
         }
 
-        if (!(event.getEntity()
-                instanceof LivingEntity living)) {
+        Entity entity =
+                event.getEntity();
 
+        if (!(entity instanceof LivingEntity livingEntity)) {
             return;
         }
 
-        if (!isNetCraftEntity(living)) {
+        if (!isNetCraftEntity(entity)) {
             return;
         }
 
-        rememberBaseValues(living);
-        applyConfiguredValues(living);
+        /*
+         * 第一次看到这个实体时保存原始属性。
+         */
+        rememberBaseValues(livingEntity);
+
+        /*
+         * 应用配置。
+         */
+        applyConfiguredValues(livingEntity);
     }
 
-    /*
-     * ============================================================
-     * 判断 NetCraft 生物
-     * ============================================================
-     */
+    // =========================================================
+    // NetCraft 判断
+    // =========================================================
 
+    /**
+     * 判断实体是否来自 NetCraft。
+     */
     public boolean isNetCraftEntity(
-            LivingEntity entity
+            Entity entity
     ) {
 
-        ResourceLocation id =
-                ForgeRegistries.ENTITY_TYPES.getKey(
-                        entity.getType()
-                );
+        if (entity == null) {
+            return false;
+        }
 
-        return id != null
-                && "netcraft".equalsIgnoreCase(
+        ResourceLocation id =
+                BuiltInRegistries.ENTITY_TYPE
+                        .getKey(entity.getType());
+
+        if (id == null) {
+            return false;
+        }
+
+        return "netcraft".equals(
                 id.getNamespace()
         );
     }
 
-    /*
-     * ============================================================
-     * 获取实体 ID
-     * ============================================================
+    /**
+     * 获取实体 ID。
      */
-
     public String getEntityId(
-            LivingEntity entity
+            Entity entity
     ) {
 
-        ResourceLocation id =
-                ForgeRegistries.ENTITY_TYPES.getKey(
-                        entity.getType()
-                );
-
-        if (id == null) {
+        if (entity == null) {
             return null;
         }
 
-        return id.toString();
+        ResourceLocation id =
+                BuiltInRegistries.ENTITY_TYPE
+                        .getKey(entity.getType());
+
+        return id == null
+                ? null
+                : id.toString();
     }
 
-    /*
-     * ============================================================
-     * 保存原始 Attribute
-     * ============================================================
-     */
+    // =========================================================
+    // 原始属性保存
+    // =========================================================
 
+    /**
+     * 保存实体原始 Minecraft 属性。
+     */
     public void rememberBaseValues(
             LivingEntity entity
     ) {
 
-        String entityId =
-                getEntityId(entity);
-
-        if (entityId == null) {
+        if (entity == null) {
             return;
         }
 
-        Map<String, Double> base =
-                baseValues.computeIfAbsent(
-                        entityId,
-                        ignored -> new LinkedHashMap<>()
-                );
+        UUID uuid =
+                entity.getUUID();
 
-        for (Map.Entry<String, Attribute> entry :
-                SUPPORTED_ATTRIBUTES.entrySet()) {
+        if (initializedEntities.containsKey(uuid)) {
+            return;
+        }
 
-            String key =
-                    entry.getKey();
+        Map<Attribute, Double> values =
+                new HashMap<>();
 
-            Attribute attribute =
-                    entry.getValue();
-
-            /*
-             * 已经记录过就不重新记录。
-             */
-            if (base.containsKey(key)) {
-                continue;
-            }
+        for (Attribute attribute :
+                SUPPORTED_ATTRIBUTES) {
 
             AttributeInstance instance =
                     entity.getAttribute(attribute);
@@ -207,40 +205,39 @@ public class NetCraftAttributeManager {
                 continue;
             }
 
-            double value =
-                    instance.getBaseValue();
-
-            if (Double.isNaN(value)
-                    || Double.isInfinite(value)) {
-
-                continue;
-            }
-
-            base.put(
-                    key,
-                    value
+            values.put(
+                    attribute,
+                    instance.getBaseValue()
             );
         }
+
+        baseValues.put(
+                uuid,
+                values
+        );
+
+        initializedEntities.put(
+                uuid,
+                Boolean.TRUE
+        );
     }
 
-    /*
-     * ============================================================
-     * 应用配置
-     * ============================================================
-     */
+    // =========================================================
+    // 配置应用
+    // =========================================================
 
+    /**
+     * 应用当前配置。
+     */
     public void applyConfiguredValues(
             LivingEntity entity
     ) {
 
-        if (!isNetCraftEntity(entity)) {
+        if (entity == null) {
             return;
         }
 
-        String entityId =
-                getEntityId(entity);
-
-        if (entityId == null) {
+        if (!isNetCraftEntity(entity)) {
             return;
         }
 
@@ -251,167 +248,6 @@ public class NetCraftAttributeManager {
             return;
         }
 
-        Map<String, Double> configured =
-                config.getEntityValues()
-                        .get(entityId);
-
-        if (configured == null
-                || configured.isEmpty()) {
-
-            return;
-        }
-
-        /*
-         * 第一次应用之前必须保存原始值。
-         */
-        rememberBaseValues(entity);
-
-        /*
-         * 保存修改前最大生命。
-         */
-        float oldMaxHealth =
-                entity.getMaxHealth();
-
-        float oldHealth =
-                entity.getHealth();
-
-        double healthRatio =
-                1.0D;
-
-        if (oldMaxHealth > 0.0F) {
-
-            healthRatio =
-                    oldHealth / oldMaxHealth;
-
-            if (healthRatio < 0.0D) {
-                healthRatio = 0.0D;
-            }
-
-            if (healthRatio > 1.0D) {
-                healthRatio = 1.0D;
-            }
-        }
-
-        boolean changed =
-                false;
-
-        /*
-         * 逐个设置 Attribute。
-         */
-        for (Map.Entry<String, Attribute> entry :
-                SUPPORTED_ATTRIBUTES.entrySet()) {
-
-            String key =
-                    entry.getKey();
-
-            Attribute attribute =
-                    entry.getValue();
-
-            Double value =
-                    configured.get(key);
-
-            if (value == null) {
-                continue;
-            }
-
-            /*
-             * -1 表示保持原值。
-             */
-            if (value < 0.0D) {
-                continue;
-            }
-
-            if (Double.isNaN(value)
-                    || Double.isInfinite(value)) {
-
-                continue;
-            }
-
-            AttributeInstance instance =
-                    entity.getAttribute(attribute);
-
-            if (instance == null) {
-                continue;
-            }
-
-            /*
-             * 直接设置 BaseValue。
-             *
-             * 不使用 add。
-             */
-            instance.setBaseValue(value);
-
-            changed = true;
-        }
-
-        if (!changed) {
-            return;
-        }
-
-        /*
-         * ========================================================
-         * 最大生命变化
-         * ========================================================
-         *
-         * 例如：
-         *
-         * 原来：
-         *
-         * 最大血量 100
-         * 当前血量 40
-         *
-         * 比例 = 40%
-         *
-         * 修改：
-         *
-         * 最大血量 1000
-         *
-         * 最后：
-         *
-         * 当前血量 400
-         */
-        float newMaxHealth =
-                entity.getMaxHealth();
-
-        if (newMaxHealth > 0.0F) {
-
-            float newHealth =
-                    (float) (
-                            newMaxHealth
-                                    * healthRatio
-                    );
-
-            if (newHealth < 0.0F) {
-                newHealth = 0.0F;
-            }
-
-            if (newHealth > newMaxHealth) {
-                newHealth = newMaxHealth;
-            }
-
-            entity.setHealth(
-                    newHealth
-            );
-        }
-
-        initializedEntities.put(
-                entity.getId(),
-                true
-        );
-    }
-
-    /*
-     * ============================================================
-     * 恢复原始 Attribute
-     * ============================================================
-     *
-     * 热加载时使用。
-     */
-
-    public void restoreBaseValues(
-            LivingEntity entity
-    ) {
-
         String entityId =
                 getEntityId(entity);
 
@@ -419,154 +255,706 @@ public class NetCraftAttributeManager {
             return;
         }
 
-        Map<String, Double> base =
-                baseValues.get(entityId);
+        /*
+         * 从 NetCraftConfig 动态读取实体配置。
+         *
+         * 兼容：
+         *
+         * getEntityAttributes(String)
+         * getAttributes(String)
+         * getEntityConfig(String)
+         * getMobAttributes(String)
+         */
+        Object configObject =
+                findEntityConfig(
+                        config,
+                        entityId
+                );
 
-        if (base == null) {
-            return;
-        }
-
-        for (Map.Entry<String, Attribute> entry :
-                SUPPORTED_ATTRIBUTES.entrySet()) {
-
-            String key =
-                    entry.getKey();
-
-            Attribute attribute =
-                    entry.getValue();
-
-            Double value =
-                    base.get(key);
-
-            if (value == null
-                    || value < 0.0D) {
-
-                continue;
-            }
-
-            AttributeInstance instance =
-                    entity.getAttribute(attribute);
-
-            if (instance == null) {
-                continue;
-            }
-
-            instance.setBaseValue(
-                    value
-            );
-        }
-    }
-
-    /*
-     * ============================================================
-     * 热加载全部实体
-     * ============================================================
-     */
-
-    public void reloadAllEntities() {
-
-        if (NetCraftToolkit.getConfig() == null) {
-            return;
-        }
-
-        var server =
-                net.minecraftforge.server.ServerLifecycleHooks
-                        .getCurrentServer();
-
-        if (server == null) {
+        if (configObject == null) {
             return;
         }
 
         /*
-         * 这个操作必须在 Minecraft 主线程执行。
+         * Minecraft 原生属性。
          */
-        server.execute(() -> {
+        applyMinecraftAttributes(
+                entity,
+                configObject
+        );
 
-            int count = 0;
-
-            for (var level :
-                    server.getAllLevels()) {
-
-                for (var entity :
-                        level.getEntities().getAll()) {
-
-                    if (!(entity
-                            instanceof LivingEntity living)) {
-
-                        continue;
-                    }
-
-                    if (!isNetCraftEntity(living)) {
-                        continue;
-                    }
-
-                    /*
-                     * 先恢复原值。
-                     */
-                    restoreBaseValues(
-                            living
-                    );
-
-                    /*
-                     * 再重新应用配置。
-                     */
-                    applyConfiguredValues(
-                            living
-                    );
-
-                    count++;
-                }
-            }
-
-            LOGGER.info(
-                    "[NetCraftToolkit] 已重新应用 {} 个 NetCraft 生物属性",
-                    count
-            );
-        });
+        /*
+         * NetCraft BossBase。
+         */
+        applyBossBaseValues(
+                entity,
+                configObject
+        );
     }
 
-    /*
-     * ============================================================
-     * 手动设置一个属性
-     * ============================================================
+    /**
+     * 查找实体配置。
+     *
+     * 不直接依赖 NetCraftConfig 某一个方法名称。
      */
-
-    public boolean setAttribute(
-            LivingEntity entity,
-            String key,
-            double value
+    private Object findEntityConfig(
+            NetCraftConfig config,
+            String entityId
     ) {
 
-        if (entity == null
-                || key == null) {
+        String[] methodNames = {
+                "getEntityAttributes",
+                "getAttributes",
+                "getEntityConfig",
+                "getMobAttributes",
+                "getMobConfig"
+        };
 
-            return false;
+        for (String methodName :
+                methodNames) {
+
+            Object value =
+                    invokeConfigMethod(
+                            config,
+                            methodName,
+                            entityId
+                    );
+
+            if (value != null) {
+                return value;
+            }
         }
 
-        Attribute attribute =
-                SUPPORTED_ATTRIBUTES.get(
-                        key.toLowerCase(Locale.ROOT)
+        return null;
+    }
+
+    /**
+     * 调用 Config 方法。
+     */
+    private Object invokeConfigMethod(
+            Object config,
+            String methodName,
+            String entityId
+    ) {
+
+        if (config == null) {
+            return null;
+        }
+
+        try {
+
+            Method method =
+                    config.getClass()
+                            .getMethod(
+                                    methodName,
+                                    String.class
+                            );
+
+            method.setAccessible(true);
+
+            return method.invoke(
+                    config,
+                    entityId
+            );
+
+        } catch (Throwable ignored) {
+
+            return null;
+        }
+    }
+
+    // =========================================================
+    // Minecraft 属性
+    // =========================================================
+
+    /**
+     * 应用 Minecraft 原生属性。
+     */
+    private void applyMinecraftAttributes(
+            LivingEntity entity,
+            Object configObject
+    ) {
+
+        applyAttribute(
+                entity,
+                Attributes.MAX_HEALTH,
+                configObject,
+                "max_health",
+                "maxHealth",
+                "health"
+        );
+
+        applyAttribute(
+                entity,
+                Attributes.ATTACK_DAMAGE,
+                configObject,
+                "attack_damage",
+                "attackDamage",
+                "damage"
+        );
+
+        applyAttribute(
+                entity,
+                Attributes.MOVEMENT_SPEED,
+                configObject,
+                "movement_speed",
+                "movementSpeed",
+                "speed"
+        );
+
+        applyAttribute(
+                entity,
+                Attributes.ARMOR,
+                configObject,
+                "armor"
+        );
+
+        applyAttribute(
+                entity,
+                Attributes.ATTACK_SPEED,
+                configObject,
+                "attack_speed",
+                "attackSpeed"
+        );
+
+        applyAttribute(
+                entity,
+                Attributes.KNOCKBACK_RESISTANCE,
+                configObject,
+                "knockback_resistance",
+                "knockbackResistance"
+        );
+
+        applyAttribute(
+                entity,
+                Attributes.FOLLOW_RANGE,
+                configObject,
+                "follow_range",
+                "followRange"
+        );
+    }
+
+    /**
+     * 设置单个 Minecraft 属性。
+     */
+    private void applyAttribute(
+            LivingEntity entity,
+            Attribute attribute,
+            Object configObject,
+            String... keys
+    ) {
+
+        Double value =
+                readDouble(
+                        configObject,
+                        keys
                 );
 
-        if (attribute == null) {
-            return false;
+        /*
+         * null = 没有配置。
+         */
+        if (value == null) {
+            return;
         }
 
-        if (Double.isNaN(value)
-                || Double.isInfinite(value)
-                || value < 0.0D) {
-
-            return false;
+        /*
+         * 负数作为禁用值。
+         *
+         * 和 NetCraftConfig 当前约定保持一致。
+         */
+        if (value < 0D) {
+            return;
         }
 
         AttributeInstance instance =
                 entity.getAttribute(attribute);
 
         if (instance == null) {
+            return;
+        }
+
+        /*
+         * 最大生命值改变时保持生命比例。
+         */
+        if (attribute == Attributes.MAX_HEALTH) {
+
+            double oldMax =
+                    entity.getMaxHealth();
+
+            double oldHealth =
+                    entity.getHealth();
+
+            instance.setBaseValue(value);
+
+            double newMax =
+                    entity.getMaxHealth();
+
+            if (oldMax > 0D &&
+                    newMax > 0D) {
+
+                double ratio =
+                        oldHealth / oldMax;
+
+                float newHealth =
+                        (float) (
+                                newMax * ratio
+                        );
+
+                entity.setHealth(
+                        Math.max(
+                                1.0F,
+                                Math.min(
+                                        newHealth,
+                                        entity.getMaxHealth()
+                                )
+                        )
+                );
+
+            } else {
+
+                entity.setHealth(
+                        entity.getMaxHealth()
+                );
+            }
+
+            return;
+        }
+
+        instance.setBaseValue(value);
+    }
+
+    // =========================================================
+    // BossBase
+    // =========================================================
+
+    /**
+     * 判断是否为 NetCraft BossBase。
+     *
+     * 不直接 import BossBase。
+     *
+     * 通过父类层级名称判断。
+     */
+    public boolean isBossBase(
+            Entity entity
+    ) {
+
+        if (entity == null) {
             return false;
         }
 
-        rememberBaseValues(entity);
+        Class<?> clazz =
+                entity.getClass();
+
+        while (clazz != null) {
+
+            if ("com.jiufeng.netcraft.entity.BossBase"
+                    .equals(clazz.getName())) {
+
+                return true;
+            }
+
+            clazz =
+                    clazz.getSuperclass();
+        }
+
+        return false;
+    }
+
+    /**
+     * 应用 BossBase 属性。
+     */
+    private void applyBossBaseValues(
+            LivingEntity entity,
+            Object configObject
+    ) {
+
+        if (!isBossBase(entity)) {
+            return;
+        }
+
+        /*
+         * NetCraft 1.4.18 的 BossBase：
+         *
+         * setBaseDamage(int)
+         * setBaseDefense(int)
+         */
+        Double damage =
+                readDouble(
+                        configObject,
+                        "base_damage",
+                        "baseDamage",
+                        "boss_damage",
+                        "bossDamage"
+                );
+
+        if (damage != null &&
+                damage >= 0D) {
+
+            invokeBossSetter(
+                    entity,
+                    "setBaseDamage",
+                    damage.intValue()
+            );
+        }
+
+        Double defense =
+                readDouble(
+                        configObject,
+                        "base_defense",
+                        "baseDefense",
+                        "boss_defense",
+                        "bossDefense"
+                );
+
+        if (defense != null &&
+                defense >= 0D) {
+
+            invokeBossSetter(
+                    entity,
+                    "setBaseDefense",
+                    defense.intValue()
+            );
+        }
+    }
+
+    /**
+     * 调用 BossBase setter。
+     */
+    private boolean invokeBossSetter(
+            Object boss,
+            String methodName,
+            int value
+    ) {
+
+        try {
+
+            Method method =
+                    boss.getClass()
+                            .getMethod(
+                                    methodName,
+                                    int.class
+                            );
+
+            method.setAccessible(true);
+
+            method.invoke(
+                    boss,
+                    value
+            );
+
+            return true;
+
+        } catch (Throwable ignored) {
+
+            /*
+             * 子类没有 public 方法时，
+             * 向父类继续寻找。
+             */
+            Class<?> current =
+                    boss.getClass();
+
+            while (current != null) {
+
+                try {
+
+                    Method method =
+                            current.getDeclaredMethod(
+                                    methodName,
+                                    int.class
+                            );
+
+                    method.setAccessible(true);
+
+                    method.invoke(
+                            boss,
+                            value
+                    );
+
+                    return true;
+
+                } catch (Throwable ignoredAgain) {
+
+                    current =
+                            current.getSuperclass();
+                }
+            }
+        }
+
+        return false;
+    }
+
+    // =========================================================
+    // 配置读取
+    // =========================================================
+
+    /**
+     * 从配置对象读取 double。
+     *
+     * 支持 Map 和普通 Java 对象。
+     */
+    @SuppressWarnings("unchecked")
+    private Double readDouble(
+            Object configObject,
+            String... keys
+    ) {
+
+        if (configObject == null) {
+            return null;
+        }
+
+        /*
+         * Map。
+         */
+        if (configObject instanceof Map<?, ?> map) {
+
+            for (String key : keys) {
+
+                Object value =
+                        map.get(key);
+
+                Double result =
+                        toDouble(value);
+
+                if (result != null) {
+                    return result;
+                }
+            }
+        }
+
+        /*
+         * 普通对象 getter。
+         */
+        for (String key : keys) {
+
+            String getter =
+                    "get"
+                            + Character.toUpperCase(
+                                    key.charAt(0)
+                            )
+                            + key.substring(1);
+
+            try {
+
+                Method method =
+                        configObject.getClass()
+                                .getMethod(
+                                        getter
+                                );
+
+                Object value =
+                        method.invoke(
+                                configObject
+                        );
+
+                Double result =
+                        toDouble(value);
+
+                if (result != null) {
+                    return result;
+                }
+
+            } catch (Throwable ignored) {
+            }
+        }
+
+        /*
+         * boolean/字段式结构也尝试读取字段。
+         */
+        for (String key : keys) {
+
+            try {
+
+                var field =
+                        configObject.getClass()
+                                .getDeclaredField(
+                                        key
+                                );
+
+                field.setAccessible(true);
+
+                Object value =
+                        field.get(
+                                configObject
+                        );
+
+                Double result =
+                        toDouble(value);
+
+                if (result != null) {
+                    return result;
+                }
+
+            } catch (Throwable ignored) {
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * 转数字。
+     */
+    private Double toDouble(
+            Object value
+    ) {
+
+        if (value instanceof Number number) {
+
+            return number.doubleValue();
+        }
+
+        if (value instanceof String string) {
+
+            try {
+
+                return Double.parseDouble(
+                        string.trim()
+                );
+
+            } catch (NumberFormatException ignored) {
+            }
+        }
+
+        return null;
+    }
+
+    // =========================================================
+    // 全量重载
+    // =========================================================
+
+    /**
+     * 重新处理当前服务器中的全部 NetCraft 生物。
+     */
+    public void reloadAllEntities() {
+
+        NetCraftConfig config =
+                NetCraftToolkit.getConfig();
+
+        if (config == null) {
+            return;
+        }
+
+        MinecraftServer server =
+                config.getServer();
+
+        if (server == null) {
+
+            return;
+        }
+
+        for (ServerLevel level :
+                server.getAllLevels()) {
+
+            for (Entity entity :
+                    level.getAllEntities()) {
+
+                if (!(entity instanceof LivingEntity livingEntity)) {
+                    continue;
+                }
+
+                if (!isNetCraftEntity(entity)) {
+                    continue;
+                }
+
+                /*
+                 * 如果实体第一次被发现，
+                 * 先保存原始属性。
+                 */
+                rememberBaseValues(
+                        livingEntity
+                );
+
+                /*
+                 * 应用新配置。
+                 */
+                applyConfiguredValues(
+                        livingEntity
+                );
+            }
+        }
+
+        NetCraftToolkit.LOGGER.info(
+                "[NetCraftToolkit] Reloaded NetCraft entities."
+        );
+    }
+
+    // =========================================================
+    // 恢复
+    // =========================================================
+
+    /**
+     * 恢复实体原始 Minecraft 属性。
+     */
+    public void restoreBaseValues(
+            LivingEntity entity
+    ) {
+
+        if (entity == null) {
+            return;
+        }
+
+        UUID uuid =
+                entity.getUUID();
+
+        Map<Attribute, Double> values =
+                baseValues.get(uuid);
+
+        if (values == null) {
+            return;
+        }
+
+        for (Map.Entry<Attribute, Double> entry :
+                values.entrySet()) {
+
+            AttributeInstance instance =
+                    entity.getAttribute(
+                            entry.getKey()
+                    );
+
+            if (instance == null) {
+                continue;
+            }
+
+            instance.setBaseValue(
+                    entry.getValue()
+            );
+        }
+
+        /*
+         * BossBase 也恢复。
+         *
+         * 这里只恢复 Minecraft 原生属性。
+         * BossBase 的原始值以后可以单独缓存。
+         */
+    }
+
+    // =========================================================
+    // 手动设置
+    // =========================================================
+
+    /**
+     * 手动设置属性。
+     */
+    public boolean setAttribute(
+            LivingEntity entity,
+            Attribute attribute,
+            double value
+    ) {
+
+        if (entity == null ||
+                attribute == null) {
+
+            return false;
+        }
+
+        AttributeInstance instance =
+                entity.getAttribute(
+                        attribute
+                );
+
+        if (instance == null) {
+            return false;
+        }
 
         instance.setBaseValue(
                 value
@@ -575,65 +963,66 @@ public class NetCraftAttributeManager {
         return true;
     }
 
-    /*
-     * ============================================================
-     * 获取原始值
-     * ============================================================
+    /**
+     * 获取当前基础属性值。
      */
-
-    public Double getBaseValue(
+    public Double getAttribute(
             LivingEntity entity,
-            String key
+            Attribute attribute
     ) {
 
-        String entityId =
-                getEntityId(entity);
-
-        if (entityId == null
-                || key == null) {
+        if (entity == null ||
+                attribute == null) {
 
             return null;
         }
 
-        Map<String, Double> values =
-                baseValues.get(entityId);
+        AttributeInstance instance =
+                entity.getAttribute(
+                        attribute
+                );
 
-        if (values == null) {
+        if (instance == null) {
             return null;
         }
 
-        return values.get(
-                key.toLowerCase(Locale.ROOT)
-        );
+        return instance.getBaseValue();
     }
 
-    /*
-     * ============================================================
-     * 清理
-     * ============================================================
-     */
+    // =========================================================
+    // 缓存
+    // =========================================================
 
+    /**
+     * 清理缓存。
+     */
     public void clear() {
 
         baseValues.clear();
         initializedEntities.clear();
+        warned.clear();
     }
 
-    /*
-     * ============================================================
-     * Getter
-     * ============================================================
+    /**
+     * 删除指定实体缓存。
      */
+    public void remove(
+            UUID uuid
+    ) {
 
-    public Map<String, Map<String, Double>>
-    getBaseValues() {
+        if (uuid == null) {
+            return;
+        }
 
-        return baseValues;
+        baseValues.remove(uuid);
+        initializedEntities.remove(uuid);
     }
 
-    public static Map<String, Attribute>
-    getSupportedAttributes() {
+    /**
+     * 获取缓存实体数量。
+     */
+    public int size() {
 
-        return SUPPORTED_ATTRIBUTES;
+        return baseValues.size();
     }
 }
