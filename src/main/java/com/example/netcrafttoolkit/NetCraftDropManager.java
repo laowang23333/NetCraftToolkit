@@ -679,4 +679,56 @@ public class NetCraftDropManager {
             double chance
     ) {
     }
+
+    /**
+     * NetCraft Boss 的一部分原版掉落不是通过 LivingDropsEvent 生成，
+     * 而是在 BossBase.spawnScatteredStacks() 中直接创建 ItemEntity，
+     * 随后调用 level.addFreshEntity()。
+     *
+     * EntityJoinLevelEvent 是该 ItemEntity 真正进入世界前的事件。
+     * 因此这里直接取消事件，而不是等物品进入世界后再删除。
+     *
+     * 只有在之前登记过 Boss 死亡拦截窗口，并且 ItemEntity 位于对应 Boss
+     * 死亡位置附近时才处理；Toolkit 自己生成的掉落通过 CUSTOM_DROP_TAG 放行。
+     */
+    @SubscribeEvent
+    public void onEntityJoinLevel(EntityJoinLevelEvent event) {
+        if (!(event.getEntity() instanceof ItemEntity itemEntity)) {
+            return;
+        }
+
+        if (!(event.getLevel() instanceof ServerLevel serverLevel)) {
+            return;
+        }
+
+        if (itemEntity.getPersistentData().getBoolean(CUSTOM_DROP_TAG)) {
+            return;
+        }
+
+        cleanupExpiredSuppressions();
+
+        for (BossDropSuppression suppression : activeSuppressions.values()) {
+            if (!suppression.level().dimension().equals(serverLevel.dimension())) {
+                continue;
+            }
+
+            if (suppression.expiresAt() < System.currentTimeMillis()) {
+                continue;
+            }
+
+            double dx = itemEntity.getX() - suppression.x();
+            double dy = itemEntity.getY() - suppression.y();
+            double dz = itemEntity.getZ() - suppression.z();
+
+            if ((dx * dx + dy * dy + dz * dz) <= 16.0D) {
+                event.setCanceled(true);
+                LOGGER.debug(
+                        "Blocked NetCraft direct Boss drop before world insertion: item={}",
+                        BuiltInRegistries.ITEM.getKey(itemEntity.getItem().getItem())
+                );
+                return;
+            }
+        }
+    }
+
 }
