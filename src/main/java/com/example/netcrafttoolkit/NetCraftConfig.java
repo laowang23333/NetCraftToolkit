@@ -1,164 +1,125 @@
 package com.example.netcrafttoolkit;
 
-import com.google.gson.JsonElement;
-import com.google.gson.JsonObject;
-import com.google.gson.JsonParser;
-import com.mojang.logging.LogUtils;
-import net.minecraft.core.registries.BuiltInRegistries;
-import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.MinecraftServer;
-import net.minecraft.server.level.ServerLevel;
-import net.minecraft.world.entity.Entity;
+import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.entity.EntityType;
-import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.ai.attributes.Attribute;
 import net.minecraft.world.entity.ai.attributes.AttributeSupplier;
 import net.minecraft.world.entity.ai.attributes.Attributes;
-import net.minecraft.world.entity.ai.attributes.DefaultAttributes;
-import net.minecraft.network.chat.Component;
-import net.minecraft.resources.ResourceKey;
-import net.minecraft.world.level.Level;
 import net.minecraftforge.event.server.ServerStoppingEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
-import org.slf4j.Logger;
+import net.minecraftforge.registries.ForgeRegistries;
 
-import java.io.InputStream;
-import java.io.InputStreamReader;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.*;
-import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicBoolean;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 /**
  * NetCraft Toolkit 配置管理器。
  *
- * 只服务 NetCraft。
+ * 功能：
+ * 1. 自动扫描 NetCraft 生物。
+ * 2. 自动生成 netcrafttoolkit.toml。
+ * 3. 读取 Boss / Elite / Mob 配置。
+ * 4. 读取 Minecraft 原生属性修改。
+ * 5. 读取 BossBase 的 base_damage / base_defense。
+ * 6. 读取紧凑型掉落配置。
  *
- * 配置文件：
+ * 掉落格式：
  *
- * config/netcrafttoolkit/netcraft-attributes.toml
+ * [boss."netcraft:xxx".drops]
+ * replace = true
+ * items = "[minecraft:diamond|1|10|0.5,netcraft:wup|10|25|1]"
  *
- * 结构：
+ * 其中：
  *
- * Boss
- * ├─ 属性
- * └─ 掉落
+ * [物品ID|最小数量|最大数量|概率]
  *
- * 精英
- * ├─ 属性
- * └─ 掉落
+ * replace = true
+ *     清除该生物全部原始物品掉落，只使用这里配置的掉落。
  *
- * 小怪
- * ├─ 属性
- * └─ 掉落
- *
- * 装备
+ * replace = false
+ *     保留该生物全部原始物品掉落，并追加这里配置的掉落。
  */
 public class NetCraftConfig {
 
-    private static final Logger LOGGER =
-            LogUtils.getLogger();
-
-    private static final String NETCRAFT =
-            "netcraft";
-
-    private static final String CONFIG_DIRECTORY =
-            "netcrafttoolkit";
-
-    private static final String CONFIG_FILE =
-            "netcraft-attributes.toml";
+    private static final String CONFIG_FILE_NAME = "netcrafttoolkit.toml";
 
     private MinecraftServer server;
-
-    private Path configDirectory;
-
     private Path configFile;
 
-    private Thread watcherThread;
-
-    private final AtomicBoolean watcherRunning =
-            new AtomicBoolean(false);
-
-    private final AtomicBoolean reloadPending =
-            new AtomicBoolean(false);
+    private ScheduledExecutorService watcher;
 
     /**
      * 生物属性。
      *
-     * entity id ->
-     * attribute name -> value
+     * entityId ->
+     *     attributeName -> value
      */
-    private final Map<
-            String,
-            Map<String, Double>>
-            entityAttributes =
-            new ConcurrentHashMap<>();
+    private final Map<String, Map<String, Double>> entityAttributes =
+            new LinkedHashMap<>();
 
     /**
      * 生物分类。
      *
-     * boss / elite / mob
+     * entityId -> boss / elite / mob
      */
-    private final Map<String, String>
-            entityCategories =
-            new ConcurrentHashMap<>();
+    private final Map<String, String> entityCategories =
+            new LinkedHashMap<>();
 
     /**
-     * 中文名称。
+     * 生物中文名称。
+     *
+     * entityId -> 中文名
      */
-    private final Map<String, String>
-            entityNames =
-            new ConcurrentHashMap<>();
+    private final Map<String, String> entityNames =
+            new LinkedHashMap<>();
 
     /**
-     * 每个生物自己的掉落配置。
+     * 掉落配置。
+     *
+     * entityId -> DropConfig
      */
-    private final Map<
-            String,
-            NetCraftDropManager.DropConfig>
-            dropConfigs =
-            new ConcurrentHashMap<>();
+    private final Map<String, NetCraftDropManager.DropConfig> dropConfigs =
+            new LinkedHashMap<>();
 
     /**
      * 装备覆盖配置。
+     *
+     * 这里暂时保存原始配置文本结构。
      */
-    private final Map<
-            String,
-            Map<String, Double>>
-            equipmentOverrides =
-            new ConcurrentHashMap<>();
+    private final Map<String, Map<String, Double>> equipmentOverrides =
+            new LinkedHashMap<>();
+
+    private volatile long lastModified = -1L;
+
+    private volatile boolean generatedInitialConfig = false;
 
     /**
      * 初始化。
      */
     public void init(MinecraftServer server) {
-
         this.server = server;
 
-        Path configRoot =
-                server.getServerDirectory()
-                        .resolve("config");
+        Path serverDirectory = server.getServerDirectory().toPath();
 
-        this.configDirectory =
-                configRoot.resolve(CONFIG_DIRECTORY);
+        this.configFile = serverDirectory.resolve(CONFIG_FILE_NAME);
 
-        this.configFile =
-                configDirectory.resolve(CONFIG_FILE);
-
-        try {
-
-            Files.createDirectories(
-                    configDirectory
-            );
-
-        } catch (Exception e) {
-
-            LOGGER.error(
-                    "[NetCraftToolkit] 无法创建配置目录。",
-                    e
-            );
-        }
+        NetCraftToolkit.LOGGER.info(
+                "[NetCraftToolkit] Config file: {}",
+                configFile.toAbsolutePath()
+        );
     }
 
     public MinecraftServer getServer() {
@@ -173,71 +134,71 @@ public class NetCraftConfig {
      * 加载配置。
      */
     public synchronized void load() {
-
-        if (server == null ||
-                configFile == null) {
-
-            LOGGER.error(
-                    "[NetCraftToolkit] 配置管理器尚未初始化。"
+        if (server == null || configFile == null) {
+            NetCraftToolkit.LOGGER.error(
+                    "[NetCraftToolkit] Cannot load config: server is null."
             );
-
             return;
         }
 
         try {
-
             if (!Files.exists(configFile)) {
+                NetCraftToolkit.LOGGER.info(
+                        "[NetCraftToolkit] Config does not exist. Generating..."
+                );
 
                 generateDefaultConfig();
+
+                generatedInitialConfig = true;
             }
 
-            readConfig();
+            parseConfig();
+
+            lastModified = Files.getLastModifiedTime(configFile).toMillis();
 
             syncDropManager();
 
-            LOGGER.info(
-                    "[NetCraftToolkit] 已加载 {} 个 NetCraft 生物属性配置。",
-                    entityAttributes.size()
-            );
-
-            LOGGER.info(
-                    "[NetCraftToolkit] 已加载 {} 个 NetCraft 生物掉落配置。",
+            NetCraftToolkit.LOGGER.info(
+                    "[NetCraftToolkit] Configuration loaded successfully. Entities: {}, drops: {}",
+                    entityAttributes.size(),
                     dropConfigs.size()
             );
 
         } catch (Exception e) {
-
-            LOGGER.error(
-                    "[NetCraftToolkit] 加载配置失败。",
+            NetCraftToolkit.LOGGER.error(
+                    "[NetCraftToolkit] Failed to load configuration.",
                     e
             );
         }
     }
 
     /**
-     * 启动热重载。
+     * 开启热重载。
      */
     public synchronized void startWatching() {
-
-        if (watcherRunning.get()) {
-
+        if (watcher != null && !watcher.isShutdown()) {
             return;
         }
 
-        watcherRunning.set(true);
+        if (configFile == null) {
+            return;
+        }
 
-        watcherThread =
-                new Thread(
-                        this::watchLoop,
-                        "NetCraftToolkit-ConfigWatcher"
-                );
+        watcher = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread thread = new Thread(r, "NetCraftToolkit-ConfigWatcher");
+            thread.setDaemon(true);
+            return thread;
+        });
 
-        watcherThread.setDaemon(true);
+        watcher.scheduleAtFixedRate(
+                this::checkForChanges,
+                2,
+                2,
+                TimeUnit.SECONDS
+        );
 
-        watcherThread.start();
-
-        LOGGER.info(
-                "[NetCraftToolkit] 配置热重载监听已启动。"
+        NetCraftToolkit.LOGGER.info(
+                "[NetCraftToolkit] Config watcher started."
         );
     }
 
@@ -245,252 +206,899 @@ public class NetCraftConfig {
      * 停止热重载。
      */
     public synchronized void stopWatching() {
-
-        watcherRunning.set(false);
-
-        if (watcherThread != null) {
-
-            watcherThread.interrupt();
-
-            watcherThread = null;
+        if (watcher != null) {
+            watcher.shutdownNow();
+            watcher = null;
         }
     }
 
+    @SubscribeEvent
+    public void onServerStopping(ServerStoppingEvent event) {
+        stopWatching();
+    }
+
     /**
-     * 配置监听线程。
+     * 检查配置文件是否发生变化。
      */
-    private void watchLoop() {
-
-        long lastModified = 0L;
-
-        while (watcherRunning.get()) {
-
-            try {
-
-                Thread.sleep(1000L);
-
-            } catch (InterruptedException e) {
-
-                Thread.currentThread().interrupt();
-
-                break;
+    private void checkForChanges() {
+        try {
+            if (configFile == null || !Files.exists(configFile)) {
+                return;
             }
 
-            try {
+            long modified =
+                    Files.getLastModifiedTime(configFile).toMillis();
 
-                if (!Files.exists(configFile)) {
+            if (lastModified <= 0L) {
+                lastModified = modified;
+                return;
+            }
 
-                    continue;
-                }
-
-                long modified =
-                        Files.getLastModifiedTime(
-                                configFile
-                        ).toMillis();
-
-                if (modified <= lastModified) {
-
-                    continue;
-                }
-
+            if (modified != lastModified) {
                 lastModified = modified;
 
-                if (!reloadPending.compareAndSet(
-                        false,
-                        true
-                )) {
+                NetCraftToolkit.LOGGER.info(
+                        "[NetCraftToolkit] Configuration changed. Reloading..."
+                );
 
-                    continue;
-                }
+                /*
+                 * 这里不要直接在 watcher 线程操作世界实体。
+                 * 只重新读取配置。
+                 */
+                parseConfig();
 
-                MinecraftServer currentServer =
-                        server;
+                syncDropManager();
 
-                if (currentServer == null) {
-
-                    reloadPending.set(false);
-
-                    continue;
-                }
-
-                currentServer.execute(() -> {
-
-                    try {
-
-                        LOGGER.info(
-                                "[NetCraftToolkit] 检测到配置文件变化，正在热重载。"
-                        );
-
-                        load();
-
-                        if (NetCraftToolkit
-                                .getAttributeManager()
-                                != null) {
-
-                            NetCraftToolkit
-                                    .getAttributeManager()
-                                    .reloadAllEntities();
-                        }
-
-                    } finally {
-
-                        reloadPending.set(false);
-                    }
-                });
-
-            } catch (Exception e) {
-
-                LOGGER.error(
-                        "[NetCraftToolkit] 配置热重载失败。",
-                        e
+                NetCraftToolkit.LOGGER.info(
+                        "[NetCraftToolkit] Configuration hot reloaded."
                 );
             }
+
+        } catch (Exception e) {
+            NetCraftToolkit.LOGGER.error(
+                    "[NetCraftToolkit] Failed while checking config changes.",
+                    e
+            );
         }
     }
 
     /**
-     * ============================================================
-     * 生成默认配置
-     * ============================================================
+     * 解析整个配置文件。
+     *
+     * 这是一个针对本项目配置格式编写的轻量 TOML 解析器，
+     * 不依赖第三方 TOML 库。
+     */
+    private synchronized void parseConfig() throws IOException {
+        entityAttributes.clear();
+        entityCategories.clear();
+        entityNames.clear();
+        dropConfigs.clear();
+        equipmentOverrides.clear();
+
+        if (!Files.exists(configFile)) {
+            return;
+        }
+
+        List<String> lines = Files.readAllLines(
+                configFile,
+                StandardCharsets.UTF_8
+        );
+
+        String currentSection = "";
+
+        for (String rawLine : lines) {
+            if (rawLine == null) {
+                continue;
+            }
+
+            String line = rawLine.trim();
+
+            if (line.isEmpty()) {
+                continue;
+            }
+
+            if (line.startsWith("#")) {
+                continue;
+            }
+
+            /*
+             * 去掉行尾注释。
+             *
+             * 但字符串里的 # 不处理。
+             */
+            line = removeTrailingComment(line).trim();
+
+            if (line.isEmpty()) {
+                continue;
+            }
+
+            /*
+             * [boss."netcraft:xxx"]
+             *
+             * [boss."netcraft:xxx".drops]
+             *
+             * [equipment."xxx"]
+             */
+            if (line.startsWith("[") && line.endsWith("]")) {
+                currentSection = line.substring(
+                        1,
+                        line.length() - 1
+                ).trim();
+
+                continue;
+            }
+
+            /*
+             * [[...]]
+             *
+             * 新格式不再使用掉落数组。
+             *
+             * 如果用户旧配置里还有这种格式，
+             * 这里直接忽略，不让它破坏新配置。
+             */
+            if (line.startsWith("[[") && line.endsWith("]]")) {
+                currentSection = "";
+                continue;
+            }
+
+            int equalsIndex = findEqualsOutsideQuotes(line);
+
+            if (equalsIndex < 0) {
+                continue;
+            }
+
+            String key = line.substring(
+                    0,
+                    equalsIndex
+            ).trim();
+
+            String value = line.substring(
+                    equalsIndex + 1
+            ).trim();
+
+            if (key.isEmpty()) {
+                continue;
+            }
+
+            parseProperty(
+                    currentSection,
+                    key,
+                    value
+            );
+        }
+    }
+
+    /**
+     * 解析单个配置属性。
+     */
+    private void parseProperty(
+            String section,
+            String key,
+            String value
+    ) {
+        if (section == null || section.isBlank()) {
+            return;
+        }
+
+        /*
+         * Boss / Elite / Mob 生物配置。
+         */
+        if (isEntitySection(section)) {
+            parseEntityProperty(
+                    section,
+                    key,
+                    value
+            );
+
+            return;
+        }
+
+        /*
+         * 掉落配置。
+         */
+        if (section.endsWith(".drops")) {
+            parseDropProperty(
+                    section,
+                    key,
+                    value
+            );
+
+            return;
+        }
+
+        /*
+         * 装备配置。
+         */
+        if (section.startsWith("equipment.")) {
+            parseEquipmentProperty(
+                    section,
+                    key,
+                    value
+            );
+        }
+    }
+
+    /**
+     * 判断是否为：
+     *
+     * boss."netcraft:xxx"
+     * elite."netcraft:xxx"
+     * mob."netcraft:xxx"
+     */
+    private boolean isEntitySection(String section) {
+        return section.startsWith("boss.")
+                || section.startsWith("elite.")
+                || section.startsWith("mob.");
+    }
+
+    /**
+     * 解析 Boss / Elite / Mob 属性。
+     */
+    private void parseEntityProperty(
+            String section,
+            String key,
+            String value
+    ) {
+        String category = getSectionCategory(section);
+
+        if (category == null) {
+            return;
+        }
+
+        String entityId = extractEntityId(section);
+
+        if (entityId == null || entityId.isBlank()) {
+            return;
+        }
+
+        entityCategories.put(
+                entityId,
+                category
+        );
+
+        /*
+         * drops 不属于普通属性。
+         */
+        if ("drops".equalsIgnoreCase(key)) {
+            return;
+        }
+
+        Double number = parseDouble(value);
+
+        if (number == null) {
+            return;
+        }
+
+        entityAttributes
+                .computeIfAbsent(
+                        entityId,
+                        id -> new LinkedHashMap<>()
+                )
+                .put(
+                        key,
+                        number
+                );
+    }
+
+    /**
+     * 解析掉落。
+     *
+     * 新格式：
+     *
+     * [boss."netcraft:xxx".drops]
+     *
+     * replace = true
+     *
+     * items = "[minecraft:diamond|1|10|0.5,netcraft:wup|10|25|1]"
+     */
+    private void parseDropProperty(
+            String section,
+            String key,
+            String value
+    ) {
+        if (!section.endsWith(".drops")) {
+            return;
+        }
+
+        String entityId = extractEntityIdFromDropSection(section);
+
+        if (entityId == null || entityId.isBlank()) {
+            return;
+        }
+
+        /*
+         * 只允许 NetCraft 生物。
+         */
+        if (!entityId.startsWith("netcraft:")) {
+            return;
+        }
+
+        NetCraftDropManager.DropConfig oldConfig =
+                dropConfigs.get(entityId);
+
+        boolean replace = false;
+
+        List<NetCraftDropManager.DropEntry> entries =
+                new ArrayList<>();
+
+        if (oldConfig != null) {
+            replace = oldConfig.replaceDrops();
+            entries.addAll(oldConfig.entries());
+        }
+
+        /*
+         * replace = true / false
+         */
+        if ("replace".equalsIgnoreCase(key)) {
+            Boolean parsed = parseBoolean(value);
+
+            if (parsed != null) {
+                replace = parsed;
+            }
+
+            dropConfigs.put(
+                    entityId,
+                    new NetCraftDropManager.DropConfig(
+                            replace,
+                            entries
+                    )
+            );
+
+            return;
+        }
+
+        /*
+         * items = "[item|min|max|chance,...]"
+         */
+        if ("items".equalsIgnoreCase(key)) {
+            entries.clear();
+
+            String cleanValue = stripQuotes(value);
+
+            entries.addAll(
+                    parseCompactDropItems(
+                            cleanValue,
+                            entityId
+                    )
+            );
+
+            dropConfigs.put(
+                    entityId,
+                    new NetCraftDropManager.DropConfig(
+                            replace,
+                            entries
+                    )
+            );
+        }
+    }
+
+    /**
+     * 从：
+     *
+     * boss."netcraft:xxx".drops
+     *
+     * 提取：
+     *
+     * netcraft:xxx
+     */
+    private String extractEntityIdFromDropSection(
+            String section
+    ) {
+        return extractEntityId(section);
+    }
+
+    /**
+     * 从：
+     *
+     * boss."netcraft:xxx"
+     *
+     * boss."netcraft:xxx".drops
+     *
+     * 提取实体 ID。
+     */
+    private String extractEntityId(String section) {
+        if (section == null) {
+            return null;
+        }
+
+        int firstQuote = section.indexOf('"');
+
+        if (firstQuote < 0) {
+            return null;
+        }
+
+        int secondQuote = section.indexOf(
+                '"',
+                firstQuote + 1
+        );
+
+        if (secondQuote < 0) {
+            return null;
+        }
+
+        return section.substring(
+                firstQuote + 1,
+                secondQuote
+        ).trim();
+    }
+
+    /**
+     * 获取：
+     *
+     * boss / elite / mob
+     */
+    private String getSectionCategory(String section) {
+        if (section.startsWith("boss.")) {
+            return "boss";
+        }
+
+        if (section.startsWith("elite.")) {
+            return "elite";
+        }
+
+        if (section.startsWith("mob.")) {
+            return "mob";
+        }
+
+        return null;
+    }
+
+    /**
+     * 解析紧凑型掉落：
+     *
+     * [minecraft:diamond|1|10|0.5]
+     *
+     * 或：
+     *
+     * [minecraft:diamond|1|10|0.5,netcraft:wup|10|25|1]
+     *
+     * 每一项：
+     *
+     * itemId|min|max|chance
+     */
+    private List<NetCraftDropManager.DropEntry> parseCompactDropItems(
+            String value,
+            String entityId
+    ) {
+        List<NetCraftDropManager.DropEntry> result =
+                new ArrayList<>();
+
+        if (value == null) {
+            return result;
+        }
+
+        value = value.trim();
+
+        if (value.isEmpty()) {
+            return result;
+        }
+
+        /*
+         * 去掉整个字符串外面的引号。
+         */
+        value = stripQuotes(value).trim();
+
+        if (value.isEmpty()) {
+            return result;
+        }
+
+        /*
+         * 支持：
+         *
+         * [diamond|1|10|0.5,netcraft:wup|10|25|1]
+         *
+         * 也支持：
+         *
+         * [diamond|1|10|0.5],[netcraft:wup|10|25|1]
+         */
+        List<String> entries =
+                splitCompactDropEntries(value);
+
+        for (String rawEntry : entries) {
+            if (rawEntry == null) {
+                continue;
+            }
+
+            String entry = rawEntry.trim();
+
+            if (entry.isEmpty()) {
+                continue;
+            }
+
+            /*
+             * 去掉单项两边的 []。
+             */
+            if (entry.startsWith("[")
+                    && entry.endsWith("]")) {
+
+                entry = entry.substring(
+                        1,
+                        entry.length() - 1
+                ).trim();
+            } else {
+                if (entry.startsWith("[")) {
+                    entry = entry.substring(1).trim();
+                }
+
+                if (entry.endsWith("]")) {
+                    entry = entry.substring(
+                            0,
+                            entry.length() - 1
+                    ).trim();
+                }
+            }
+
+            if (entry.isEmpty()) {
+                continue;
+            }
+
+            String[] parts =
+                    entry.split("\\|", -1);
+
+            if (parts.length != 4) {
+                NetCraftToolkit.LOGGER.warn(
+                        "[NetCraftToolkit] Invalid drop entry for {}: [{}]",
+                        entityId,
+                        entry
+                );
+
+                continue;
+            }
+
+            String itemId =
+                    parts[0].trim();
+
+            if (itemId.isEmpty()) {
+                NetCraftToolkit.LOGGER.warn(
+                        "[NetCraftToolkit] Empty item id for {}.",
+                        entityId
+                );
+
+                continue;
+            }
+
+            Integer minCount =
+                    parseInteger(parts[1]);
+
+            Integer maxCount =
+                    parseInteger(parts[2]);
+
+            Double chance =
+                    parseDouble(parts[3]);
+
+            if (minCount == null
+                    || maxCount == null
+                    || chance == null) {
+
+                NetCraftToolkit.LOGGER.warn(
+                        "[NetCraftToolkit] Invalid drop numbers for {}: [{}]",
+                        entityId,
+                        entry
+                );
+
+                continue;
+            }
+
+            /*
+             * 数量至少 1。
+             */
+            minCount = Math.max(
+                    1,
+                    minCount
+            );
+
+            maxCount = Math.max(
+                    1,
+                    maxCount
+            );
+
+            /*
+             * 防止反过来写。
+             */
+            if (maxCount < minCount) {
+                int temp = minCount;
+                minCount = maxCount;
+                maxCount = temp;
+            }
+
+            /*
+             * 概率限制在 0~1。
+             */
+            chance = Math.max(
+                    0.0D,
+                    Math.min(
+                            1.0D,
+                            chance
+                    )
+            );
+
+            /*
+             * 验证物品 ID 格式。
+             *
+             * 这里不要求物品一定存在，
+             * 因为 NetCraft 自定义物品可能在后续注册阶段处理。
+             */
+            try {
+                ResourceLocation.parse(itemId);
+            } catch (Exception e) {
+                NetCraftToolkit.LOGGER.warn(
+                        "[NetCraftToolkit] Invalid item id for {}: {}",
+                        entityId,
+                        itemId
+                );
+
+                continue;
+            }
+
+            result.add(
+                    new NetCraftDropManager.DropEntry(
+                            itemId,
+                            minCount,
+                            maxCount,
+                            chance
+                    )
+            );
+        }
+
+        return result;
+    }
+
+    /**
+     * 分割紧凑掉落列表。
+     *
+     * 例如：
+     *
+     * [minecraft:diamond|1|10|0.5,netcraft:wup|10|25|1]
+     *
+     * 会变成：
+     *
+     * minecraft:diamond|1|10|0.5
+     * netcraft:wup|10|25|1
+     */
+    private List<String> splitCompactDropEntries(
+            String value
+    ) {
+        List<String> result =
+                new ArrayList<>();
+
+        if (value == null || value.isBlank()) {
+            return result;
+        }
+
+        String text = value.trim();
+
+        /*
+         * 情况一：
+         *
+         * [diamond|1|10|0.5],[wup|10|25|1]
+         */
+        if (text.contains("],["))
+        {
+            String[] parts =
+                    text.split("\\],\\[");
+
+            for (String part : parts) {
+                String clean = part.trim();
+
+                if (!clean.startsWith("[")) {
+                    clean = "[" + clean;
+                }
+
+                if (!clean.endsWith("]")) {
+                    clean = clean + "]";
+                }
+
+                result.add(clean);
+            }
+
+            return result;
+        }
+
+        /*
+         * 情况二：
+         *
+         * [diamond|1|10|0.5,wup|10|25|1]
+         *
+         * 这是我们主要支持的格式。
+         *
+         * 外层 [] 只是整个 items 字符串的容器，
+         * 内部逗号才是掉落项分隔符。
+         */
+        if (text.startsWith("[")
+                && text.endsWith("]")) {
+
+            String inner =
+                    text.substring(
+                            1,
+                            text.length() - 1
+                    ).trim();
+
+            if (inner.isEmpty()) {
+                return result;
+            }
+
+            String[] parts =
+                    inner.split(",");
+
+            for (String part : parts) {
+                String clean = part.trim();
+
+                if (!clean.isEmpty()) {
+                    result.add(clean);
+                }
+            }
+
+            return result;
+        }
+
+        /*
+         * 情况三：
+         *
+         * diamond|1|10|0.5,wup|10|25|1
+         */
+        String[] parts =
+                text.split(",");
+
+        Collections.addAll(
+                result,
+                parts
+        );
+
+        return result;
+    }
+
+    /**
+     * 解析装备配置。
+     *
+     * 目前只保存配置数据，不直接调用 NetCraft。
+     * 后续 EquipmentOverrideWriter / Reflection 层负责应用。
+     */
+    private void parseEquipmentProperty(
+            String section,
+            String key,
+            String value
+    ) {
+        String equipmentId =
+                extractEquipmentId(section);
+
+        if (equipmentId == null
+                || equipmentId.isBlank()) {
+            return;
+        }
+
+        Double number =
+                parseDouble(value);
+
+        if (number == null) {
+            return;
+        }
+
+        equipmentOverrides
+                .computeIfAbsent(
+                        equipmentId,
+                        id -> new LinkedHashMap<>()
+                )
+                .put(
+                        key,
+                        number
+                );
+    }
+
+    /**
+     * 提取 equipment 配置中的 ID。
+     */
+    private String extractEquipmentId(
+            String section
+    ) {
+        int firstQuote =
+                section.indexOf('"');
+
+        if (firstQuote < 0) {
+            return null;
+        }
+
+        int secondQuote =
+                section.indexOf(
+                        '"',
+                        firstQuote + 1
+                );
+
+        if (secondQuote < 0) {
+            return null;
+        }
+
+        return section.substring(
+                firstQuote + 1,
+                secondQuote
+        ).trim();
+    }
+
+    /**
+     * 同步掉落配置到 DropManager。
+     */
+    private void syncDropManager() {
+        NetCraftDropManager manager =
+                NetCraftToolkit.getDropManager();
+
+        if (manager == null) {
+            return;
+        }
+
+        manager.clear();
+
+        for (Map.Entry<
+                String,
+                NetCraftDropManager.DropConfig> entry
+                : dropConfigs.entrySet()) {
+
+            manager.setDropConfig(
+                    entry.getKey(),
+                    entry.getValue()
+            );
+        }
+
+        NetCraftToolkit.LOGGER.info(
+                "[NetCraftToolkit] Drop configurations synchronized: {}",
+                dropConfigs.size()
+        );
+    }
+
+    /**
+     * 生成默认配置。
+     *
+     * 只生成 NetCraft 生物。
+     *
+     * 不会把 Minecraft 原版僵尸、骷髅等写进来。
      */
     private void generateDefaultConfig()
-            throws Exception {
-
-        List<EntityInfo> entities =
-                scanNetCraftEntities();
+            throws IOException {
 
         StringBuilder out =
                 new StringBuilder();
 
-        out.append(
-                "# ============================================================\n"
-        );
+        out.append("# ============================================================\n");
+        out.append("# NetCraft Toolkit\n");
+        out.append("# 自动生成配置文件\n");
+        out.append("# Minecraft 1.20.1 / Forge 47.4.13\n");
+        out.append("#\n");
+        out.append("# 只处理 NetCraft 生物。\n");
+        out.append("# ============================================================\n\n");
 
-        out.append(
-                "# NetCraft Toolkit\n"
-        );
+        out.append("# ============================================================\n");
+        out.append("# 一、Boss\n");
+        out.append("# ============================================================\n\n");
 
-        out.append(
-                "# NetCraft 生物属性 / 掉落配置\n"
-        );
-
-        out.append(
-                "# Minecraft 1.20.1 / Forge 47.4.13\n"
-        );
-
-        out.append(
-                "# ============================================================\n\n"
-        );
-
-        out.append(
-                "# 本配置文件只服务 NetCraft。\n"
-        );
-
-        out.append(
-                "# Minecraft 原版生物不会出现在这里。\n"
-        );
-
-        out.append(
-                "#\n"
-        );
-
-        out.append(
-                "# 属性数值：直接填写你想要的最终数值。\n"
-        );
-
-        out.append(
-                "# -1：表示不修改该项。\n\n"
-        );
-
-        /*
-         * =========================================================
-         * Boss
-         * =========================================================
-         */
-
-        appendCategoryHeader(
+        generateCategoryConfig(
                 out,
-                "一、Boss"
+                "boss"
         );
 
-        for (EntityInfo entity : entities) {
+        out.append("# ============================================================\n");
+        out.append("# 二、Elite\n");
+        out.append("# ============================================================\n\n");
 
-            if (!"boss".equals(
-                    entity.category
-            )) {
-
-                continue;
-            }
-
-            appendEntity(
-                    out,
-                    "boss",
-                    entity
-            );
-        }
-
-        /*
-         * =========================================================
-         * Elite
-         * =========================================================
-         */
-
-        appendCategoryHeader(
+        generateCategoryConfig(
                 out,
-                "二、精英"
+                "elite"
         );
 
-        for (EntityInfo entity : entities) {
+        out.append("# ============================================================\n");
+        out.append("# 三、Mob\n");
+        out.append("# ============================================================\n\n");
 
-            if (!"elite".equals(
-                    entity.category
-            )) {
-
-                continue;
-            }
-
-            appendEntity(
-                    out,
-                    "elite",
-                    entity
-            );
-        }
-
-        /*
-         * =========================================================
-         * Mob
-         * =========================================================
-         */
-
-        appendCategoryHeader(
+        generateCategoryConfig(
                 out,
-                "三、小怪"
+                "mob"
         );
 
-        for (EntityInfo entity : entities) {
+        out.append("# ============================================================\n");
+        out.append("# 四、Equipment\n");
+        out.append("# ============================================================\n\n");
 
-            if (!"mob".equals(
-                    entity.category
-            )) {
+        generateEquipmentConfig(out);
 
-                continue;
-            }
-
-            appendEntity(
-                    out,
-                    "mob",
-                    entity
-            );
-        }
-
-        /*
-         * =========================================================
-         * Equipment
-         * =========================================================
-         */
-
-        appendEquipmentSection(
-                out
+        Files.createDirectories(
+                configFile.getParent()
         );
 
         Files.writeString(
@@ -502,2239 +1110,876 @@ public class NetCraftConfig {
                 StandardOpenOption.WRITE
         );
 
-        LOGGER.info(
-                "[NetCraftToolkit] 已生成默认 NetCraft 配置：{}",
-                configFile
+        NetCraftToolkit.LOGGER.info(
+                "[NetCraftToolkit] Default config generated."
         );
     }
 
     /**
-     * 分类标题。
+     * 生成某一个分类。
      */
-    private void appendCategoryHeader(
+    private void generateCategoryConfig(
             StringBuilder out,
-            String title
+            String category
     ) {
-
-        out.append(
-                "\n# ============================================================\n"
-        );
-
-        out.append(
-                "# "
-        );
-
-        out.append(title);
-
-        out.append(
-                "\n"
-        );
-
-        out.append(
-                "# ============================================================\n\n"
-        );
-    }
-
-    /**
-     * 输出单个生物。
-     */
-    private void appendEntity(
-            StringBuilder out,
-            String category,
-            EntityInfo entity
-    ) {
-
-        out.append(
-                "# ------------------------------------------------------------\n"
-        );
-
-        out.append(
-                "# 【"
-        );
-
-        out.append(
-                entity.displayName
-        );
-
-        out.append(
-                "】\n"
-        );
-
-        out.append(
-                "# 注册名："
-        );
-
-        out.append(
-                entity.id
-        );
-
-        out.append(
-                "\n"
-        );
-
-        out.append(
-                "# ------------------------------------------------------------\n\n"
-        );
-
-        out.append(
-                "["
-        );
-
-        out.append(category);
-
-        out.append(
-                ".\""
-        );
-
-        out.append(
-                entity.id
-        );
-
-        out.append(
-                "\"]\n\n"
-        );
-
-        appendDoubleAttribute(
-                out,
-                "max_health",
-                "最大生命值",
-                entity.defaults.get(
-                        "max_health"
-                )
-        );
-
-        appendDoubleAttribute(
-                out,
-                "attack_damage",
-                "攻击伤害",
-                entity.defaults.get(
-                        "attack_damage"
-                )
-        );
-
-        appendDoubleAttribute(
-                out,
-                "movement_speed",
-                "移动速度",
-                entity.defaults.get(
-                        "movement_speed"
-                )
-        );
-
-        appendDoubleAttribute(
-                out,
-                "armor",
-                "护甲值",
-                entity.defaults.get(
-                        "armor"
-                )
-        );
-
-        appendDoubleAttribute(
-                out,
-                "attack_speed",
-                "攻击速度",
-                entity.defaults.get(
-                        "attack_speed"
-                )
-        );
-
-        appendDoubleAttribute(
-                out,
-                "knockback_resistance",
-                "击退抗性",
-                entity.defaults.get(
-                        "knockback_resistance"
-                )
-        );
-
-        appendDoubleAttribute(
-                out,
-                "follow_range",
-                "跟随 / 索敌距离",
-                entity.defaults.get(
-                        "follow_range"
-                )
-        );
-
-        /*
-         * BossBase 专属。
-         */
-        if ("boss".equals(category)) {
-
-            appendIntegerAttribute(
-                    out,
-                    "base_damage",
-                    "NetCraft BossBase 基础伤害",
-                    entity.baseDamage
-            );
-
-            appendIntegerAttribute(
-                    out,
-                    "base_defense",
-                    "NetCraft BossBase 基础防御",
-                    entity.baseDefense
-            );
-        }
-
-        out.append(
-                "# ============================================================\n"
-        );
-
-        out.append(
-                "# 掉落物\n"
-        );
-
-        out.append(
-                "# ============================================================\n"
-        );
-
-        out.append(
-                "# replace = true：删除该生物全部 NetCraft 原掉落，只使用下面配置\n"
-        );
-
-        out.append(
-                "# replace = false：保留该生物全部 NetCraft 原掉落，并增加下面配置\n"
-        );
-
-        out.append(
-                "#\n"
-        );
-
-        out.append(
-                "# 注意：这里修改的是这个生物的全部掉落事件。\n"
-        );
-
-        out.append(
-                "# 不是只修改两个新增物品。\n\n"
-        );
-
-        out.append(
-                "["
-        );
-
-        out.append(category);
-
-        out.append(
-                ".\""
-        );
-
-        out.append(entity.id);
-
-        out.append(
-                "\".drops]\n"
-        );
-
-        out.append(
-                "replace = false\n\n"
-        );
-
-        out.append(
-                "# 添加自定义掉落示例：\n"
-        );
-
-        out.append(
-                "# [["
-        );
-
-        out.append(category);
-
-        out.append(
-                ".\""
-        );
-
-        out.append(entity.id);
-
-        out.append(
-                "\".drops.items]]\n"
-        );
-
-        out.append(
-                "# item = \"minecraft:diamond\"\n"
-        );
-
-        out.append(
-                "# min_count = 1\n"
-        );
-
-        out.append(
-                "# max_count = 3\n"
-        );
-
-        out.append(
-                "# chance = 1.0\n\n"
-        );
-    }
-
-    /**
-     * 输出小数属性。
-     */
-    private void appendDoubleAttribute(
-            StringBuilder out,
-            String key,
-            String comment,
-            Double defaultValue
-    ) {
-
-        double value =
-                defaultValue == null
-                        ? -1D
-                        : defaultValue;
-
-        out.append(
-                "# "
-        );
-
-        out.append(comment);
-
-        out.append(
-                "\n"
-        );
-
-        out.append(
-                "# NetCraft 默认值："
-        );
-
-        out.append(
-                formatNumber(value)
-        );
-
-        out.append(
-                "\n"
-        );
-
-        out.append(
-                key
-        );
-
-        out.append(
-                " = "
-        );
-
-        out.append(
-                formatNumber(value)
-        );
-
-        out.append(
-                "\n\n"
-        );
-    }
-
-    /**
-     * 输出整数属性。
-     */
-    private void appendIntegerAttribute(
-            StringBuilder out,
-            String key,
-            String comment,
-            int defaultValue
-    ) {
-
-        out.append(
-                "# "
-        );
-
-        out.append(comment);
-
-        out.append(
-                "\n"
-        );
-
-        out.append(
-                "# NetCraft 默认值："
-        );
-
-        if (defaultValue < 0) {
-
-            out.append(
-                    "未读取"
-            );
-
-        } else {
-
-            out.append(
-                    defaultValue
-            );
-        }
-
-        out.append(
-                "\n"
-        );
-
-        out.append(
-                key
-        );
-
-        out.append(
-                " = "
-        );
-
-        out.append(
-                defaultValue
-        );
-
-        out.append(
-                "\n\n"
-        );
-    }
-
-    /**
-     * 装备区域。
-     */
-    private void appendEquipmentSection(
-            StringBuilder out
-    ) {
-
-        appendCategoryHeader(
-                out,
-                "四、NetCraft 装备"
-        );
-
-        out.append(
-                "# 职业：\n"
-        );
-
-        out.append(
-                "# knight / archer / mage / summoner / dragonknight / wararcher\n\n"
-        );
-
-        out.append(
-                "# 位置：\n"
-        );
-
-        out.append(
-                "# mainhand / offhand / helmet / chestplate / leggings / boots\n\n"
-        );
-
-        out.append(
-                "# 属性：\n"
-        );
-
-        out.append(
-                "# meleeDamage      = 近战伤害\n"
-        );
-
-        out.append(
-                "# rangedDamage     = 远程伤害\n"
-        );
-
-        out.append(
-                "# magicDamage      = 魔法伤害\n"
-        );
-
-        out.append(
-                "# physicalDefense  = 物理防御\n"
-        );
-
-        out.append(
-                "# magicDefense     = 魔法防御\n"
-        );
-
-        out.append(
-                "# health           = 生命值\n"
-        );
-
-        out.append(
-                "# armor            = 护甲\n"
-        );
-
-        out.append(
-                "# -1 = 不修改\n\n"
-        );
-
-        out.append(
-                "# 示例：\n"
-        );
-
-        out.append(
-                "# [equipment.\"knight.t1.mainhand\"]\n"
-        );
-
-        out.append(
-                "# meleeDamage = -1\n"
-        );
-
-        out.append(
-                "# rangedDamage = -1\n"
-        );
-
-        out.append(
-                "# magicDamage = -1\n"
-        );
-
-        out.append(
-                "# physicalDefense = -1\n"
-        );
-
-        out.append(
-                "# magicDefense = -1\n"
-        );
-
-        out.append(
-                "# health = -1\n"
-        );
-
-        out.append(
-                "# armor = -1\n"
-        );
-    }
-
-    /**
-     * ============================================================
-     * 扫描 NetCraft 实体
-     * ============================================================
-     */
-    private List<EntityInfo>
-    scanNetCraftEntities() {
-
-        List<EntityInfo> result =
-                new ArrayList<>();
-
         for (Map.Entry<
                 ResourceLocation,
-                EntityType<?>>
-                registryEntry :
-                BuiltInRegistries
-                        .ENTITY_TYPE
-                        .entrySet()) {
+                EntityType<?>> entry
+                : ForgeRegistries.ENTITY_TYPES.getEntries()) {
 
             ResourceLocation id =
-                    registryEntry.getKey();
+                    entry.getKey();
 
-            if (id == null ||
-                    !NETCRAFT.equals(
-                            id.getNamespace()
-                    )) {
-
+            /*
+             * 只扫描 NetCraft。
+             */
+            if (!"netcraft".equals(
+                    id.getNamespace()
+            )) {
                 continue;
             }
 
             EntityType<?> type =
-                    registryEntry.getValue();
+                    entry.getValue();
 
             if (type == null) {
-
                 continue;
             }
 
             /*
-             * 没有 LivingEntity 默认属性的：
-             *
-             * 弹幕
-             * 箭
-             * 投射物
-             * 火焰领域
-             *
-             * 等不属于生物的实体全部跳过。
+             * 尝试判断分类。
              */
-            if (!DefaultAttributes.hasSupplier(
-                    type
-            )) {
+            String detectedCategory =
+                    detectEntityCategory(
+                            type
+                    );
 
+            if (!category.equalsIgnoreCase(
+                    detectedCategory
+            )) {
                 continue;
             }
 
-            String idString =
+            String entityId =
                     id.toString();
 
-            String category =
-                    detectCategory(
-                            idString
-                    );
-
-            String displayName =
-                    getChineseEntityName(
-                            idString,
+            String chineseName =
+                    getEntityChineseName(
+                            id,
                             type
                     );
 
-            Map<String, Double> defaults =
-                    readDefaultAttributes(
-                            type
-                    );
-
-            int baseDamage = -1;
-            int baseDefense = -1;
-
-            if ("boss".equals(category)) {
-
-                int[] bossValues =
-                        readBossDefaults(
-                                type
-                        );
-
-                baseDamage =
-                        bossValues[0];
-
-                baseDefense =
-                        bossValues[1];
-            }
-
-            result.add(
-                    new EntityInfo(
-                            idString,
-                            displayName,
-                            category,
-                            defaults,
-                            baseDamage,
-                            baseDefense
-                    )
+            entityNames.put(
+                    entityId,
+                    chineseName
             );
+
+            entityCategories.put(
+                    entityId,
+                    category
+            );
+
+            out.append("# ------------------------------------------------------------\n");
+            out.append("# 【")
+                    .append(chineseName)
+                    .append("】\n");
+            out.append("# 注册名：")
+                    .append(entityId)
+                    .append("\n");
+            out.append("# ------------------------------------------------------------\n");
+
+            out.append("[")
+                    .append(category)
+                    .append(".\"")
+                    .append(entityId)
+                    .append("\"]\n\n");
+
+            writeEntityAttributes(
+                    out,
+                    type
+            );
+
+            out.append("\n");
+
+            /*
+             * Boss / Elite / Mob 每个生物都单独拥有 drops。
+             */
+            out.append("[")
+                    .append(category)
+                    .append(".\"")
+                    .append(entityId)
+                    .append("\".drops]\n");
+
+            out.append("# true  = 替换这个生物的全部原始物品掉落\n");
+            out.append("# false = 保留全部原始物品掉落，并追加下面的自定义掉落\n");
+            out.append("replace = false\n");
+
+            out.append("# 格式：\n");
+            out.append("# [物品ID|最小数量|最大数量|概率]\n");
+            out.append("# 多个掉落用英文逗号分隔\n");
+            out.append("# 例如：\n");
+            out.append("# items = \"[minecraft:diamond|1|10|0.5,netcraft:wup|10|25|1]\"\n");
+            out.append("items = \"\"\n\n");
         }
-
-        result.sort(
-                Comparator
-                        .comparingInt(
-                                e ->
-                                        categoryOrder(
-                                                e.category
-                                        )
-                        )
-                        .thenComparing(
-                                e -> e.displayName
-                        )
-                        .thenComparing(
-                                e -> e.id
-                        )
-        );
-
-        return result;
     }
 
     /**
-     * NetCraft 1.4.18 的分类。
-     *
-     * 这是根据它实际的注册命名规则：
-     *
-     * entity_boss_
-     * entity_elite_
-     * entity_minion_
-     *
-     * 来分。
+     * 写入一个生物的属性。
      */
-    private String detectCategory(
-            String id
+    private void writeEntityAttributes(
+            StringBuilder out,
+            EntityType<?> type
     ) {
+        try {
+            AttributeSupplier supplier =
+                    type.getAttributes();
 
-        String path =
-                id.substring(
-                        id.indexOf(':') + 1
-                );
+            if (supplier == null) {
+                writeDefaultUnknownAttributes(out);
+                return;
+            }
 
-        if (path.startsWith(
-                "entity_boss_"
-        )) {
+            writeAttribute(
+                    out,
+                    "max_health",
+                    "最大生命值",
+                    Attributes.MAX_HEALTH,
+                    supplier
+            );
 
-            return "boss";
-        }
+            writeAttribute(
+                    out,
+                    "attack_damage",
+                    "攻击伤害",
+                    Attributes.ATTACK_DAMAGE,
+                    supplier
+            );
 
-        if (path.startsWith(
-                "entity_elite_"
-        )) {
+            writeAttribute(
+                    out,
+                    "movement_speed",
+                    "移动速度",
+                    Attributes.MOVEMENT_SPEED,
+                    supplier
+            );
 
-            return "elite";
-        }
+            writeAttribute(
+                    out,
+                    "armor",
+                    "护甲值",
+                    Attributes.ARMOR,
+                    supplier
+            );
 
-        if (path.startsWith(
-                "entity_minion_"
-        )) {
+            writeAttribute(
+                    out,
+                    "attack_speed",
+                    "攻击速度",
+                    Attributes.ATTACK_SPEED,
+                    supplier
+            );
 
-            return "mob";
+            writeAttribute(
+                    out,
+                    "knockback_resistance",
+                    "击退抗性",
+                    Attributes.KNOCKBACK_RESISTANCE,
+                    supplier
+            );
+
+            writeAttribute(
+                    out,
+                    "follow_range",
+                    "跟随范围",
+                    Attributes.FOLLOW_RANGE,
+                    supplier
+            );
+
+        } catch (Exception e) {
+            NetCraftToolkit.LOGGER.debug(
+                    "[NetCraftToolkit] Failed to read default attributes.",
+                    e
+            );
+
+            writeDefaultUnknownAttributes(out);
         }
 
         /*
-         * NetCraft 里其他 LivingEntity，
-         * 不放进 Boss / Elite。
+         * BossBase 专属属性。
          *
-         * 统一归小怪区。
+         * 这里不直接导入 NetCraft 类，
+         * 防止 NetCraft 没有安装时导致类加载崩溃。
+         */
+        if (isBossEntity(type)) {
+            out.append("\n");
+
+            out.append("# BossBase 基础伤害\n");
+            out.append("# NetCraft 默认值需要从 BossBase 实例读取\n");
+            out.append("base_damage = -1\n");
+
+            out.append("\n");
+
+            out.append("# BossBase 基础防御\n");
+            out.append("# NetCraft 默认值需要从 BossBase 实例读取\n");
+            out.append("base_defense = -1\n");
+        }
+    }
+
+    /**
+     * 写入一个 Minecraft 原生属性。
+     */
+    private void writeAttribute(
+            StringBuilder out,
+            String configName,
+            String chineseName,
+            Attribute attribute,
+            AttributeSupplier supplier
+    ) {
+        try {
+            double value =
+                    supplier.getValue(attribute);
+
+            out.append("# ")
+                    .append(chineseName)
+                    .append("\n");
+
+            out.append("# NetCraft 默认值：")
+                    .append(value)
+                    .append("\n");
+
+            out.append(configName)
+                    .append(" = ")
+                    .append(value)
+                    .append("\n\n");
+
+        } catch (Exception ignored) {
+            /*
+             * 该实体没有这个属性时不输出。
+             */
+        }
+    }
+
+    /**
+     * 没有原生属性时的占位。
+     */
+    private void writeDefaultUnknownAttributes(
+            StringBuilder out
+    ) {
+        out.append("# 该实体没有可读取的标准属性数据。\n");
+    }
+
+    /**
+     * 判断实体是否为 BossBase。
+     *
+     * 不直接 import NetCraft。
+     */
+    private boolean isBossEntity(
+            EntityType<?> type
+    ) {
+        try {
+            Class<?> entityClass =
+                    type.getBaseClass();
+
+            while (entityClass != null) {
+                String name =
+                        entityClass.getName();
+
+                if (name.endsWith("BossBase")) {
+                    return true;
+                }
+
+                entityClass =
+                        entityClass.getSuperclass();
+            }
+
+        } catch (Exception ignored) {
+        }
+
+        return false;
+    }
+
+    /**
+     * 尝试判断实体分类。
+     *
+     * 优先根据类名。
+     */
+    private String detectEntityCategory(
+            EntityType<?> type
+    ) {
+        try {
+            Class<?> clazz =
+                    type.getBaseClass();
+
+            while (clazz != null) {
+                String name =
+                        clazz.getSimpleName()
+                                .toLowerCase(
+                                        Locale.ROOT
+                                );
+
+                if (name.contains("boss")) {
+                    return "boss";
+                }
+
+                if (name.contains("elite")) {
+                    return "elite";
+                }
+
+                clazz =
+                        clazz.getSuperclass();
+            }
+
+        } catch (Exception ignored) {
+        }
+
+        /*
+         * 如果不是 Boss / Elite，
+         * 默认归入 Mob。
          */
         return "mob";
     }
 
-    private int categoryOrder(
-            String category
-    ) {
-
-        if ("boss".equals(category)) {
-            return 0;
-        }
-
-        if ("elite".equals(category)) {
-            return 1;
-        }
-
-        return 2;
-    }
-
     /**
-     * 读取默认 Minecraft 属性。
-     */
-    @SuppressWarnings("unchecked")
-    private Map<String, Double>
-    readDefaultAttributes(
-            EntityType<?> type
-    ) {
-
-        Map<String, Double> result =
-                new LinkedHashMap<>();
-
-        result.put(
-                "max_health",
-                -1D
-        );
-
-        result.put(
-                "attack_damage",
-                -1D
-        );
-
-        result.put(
-                "movement_speed",
-                -1D
-        );
-
-        result.put(
-                "armor",
-                -1D
-        );
-
-        result.put(
-                "attack_speed",
-                -1D
-        );
-
-        result.put(
-                "knockback_resistance",
-                -1D
-        );
-
-        result.put(
-                "follow_range",
-                -1D
-        );
-
-        try {
-
-            AttributeSupplier supplier =
-                    DefaultAttributes.getSupplier(
-                            (EntityType<? extends LivingEntity>)
-                                    type
-                    );
-
-            readAttribute(
-                    result,
-                    supplier,
-                    "max_health",
-                    Attributes.MAX_HEALTH
-            );
-
-            readAttribute(
-                    result,
-                    supplier,
-                    "attack_damage",
-                    Attributes.ATTACK_DAMAGE
-            );
-
-            readAttribute(
-                    result,
-                    supplier,
-                    "movement_speed",
-                    Attributes.MOVEMENT_SPEED
-            );
-
-            readAttribute(
-                    result,
-                    supplier,
-                    "armor",
-                    Attributes.ARMOR
-            );
-
-            readAttribute(
-                    result,
-                    supplier,
-                    "attack_speed",
-                    Attributes.ATTACK_SPEED
-            );
-
-            readAttribute(
-                    result,
-                    supplier,
-                    "knockback_resistance",
-                    Attributes.KNOCKBACK_RESISTANCE
-            );
-
-            readAttribute(
-                    result,
-                    supplier,
-                    "follow_range",
-                    Attributes.FOLLOW_RANGE
-            );
-
-        } catch (Throwable e) {
-
-            LOGGER.warn(
-                    "[NetCraftToolkit] 读取默认属性失败：{}",
-                    type
-            );
-        }
-
-        return result;
-    }
-
-    /**
-     * 读取 AttributeSupplier 默认值。
-     */
-    private void readAttribute(
-            Map<String, Double> result,
-            AttributeSupplier supplier,
-            String key,
-            Attribute attribute
-    ) {
-
-        try {
-
-            if (supplier.hasAttribute(
-                    attribute
-            )) {
-
-                result.put(
-                        key,
-                        supplier.getValue(
-                                attribute
-                        )
-                );
-            }
-
-        } catch (Throwable ignored) {
-        }
-    }
-
-    /**
-     * 读取 BossBase 默认值。
+     * 获取 NetCraft 中文名称。
      *
-     * 不直接依赖 NetCraft Java 类。
+     * 优先读取：
      *
-     * 使用反射：
-     *
-     * getBaseDamage()
-     * getBaseDefense()
-     */
-    private int[] readBossDefaults(
-            EntityType<?> type
-    ) {
-
-        int baseDamage = -1;
-        int baseDefense = -1;
-
-        if (server == null) {
-
-            return new int[]{
-                    -1,
-                    -1
-            };
-        }
-
-        try {
-
-            ServerLevel level =
-                    server.overworld();
-
-            if (level == null) {
-
-                return new int[]{
-                        -1,
-                        -1
-                };
-            }
-
-            Entity entity =
-                    type.create(level);
-
-            if (entity == null) {
-
-                return new int[]{
-                        -1,
-                        -1
-                };
-            }
-
-            Class<?> clazz =
-                    entity.getClass();
-
-            MethodResult damage =
-                    invokeNoArgs(
-                            clazz,
-                            entity,
-                            "getBaseDamage"
-                    );
-
-            MethodResult defense =
-                    invokeNoArgs(
-                            clazz,
-                            entity,
-                            "getBaseDefense"
-                    );
-
-            if (damage.success &&
-                    damage.value instanceof Number) {
-
-                baseDamage =
-                        ((Number) damage.value)
-                                .intValue();
-            }
-
-            if (defense.success &&
-                    defense.value instanceof Number) {
-
-                baseDefense =
-                        ((Number) defense.value)
-                                .intValue();
-            }
-
-            /*
-             * 没有加入世界，所以不需要 remove。
-             */
-
-        } catch (Throwable e) {
-
-            LOGGER.debug(
-                    "[NetCraftToolkit] 读取 BossBase 默认值失败。",
-                    e
-            );
-        }
-
-        return new int[]{
-                baseDamage,
-                baseDefense
-        };
-    }
-
-    /**
-     * 反射调用无参数方法。
-     */
-    private MethodResult invokeNoArgs(
-            Class<?> clazz,
-            Object instance,
-            String name
-    ) {
-
-        Class<?> current = clazz;
-
-        while (current != null) {
-
-            try {
-
-                java.lang.reflect.Method method =
-                        current.getDeclaredMethod(
-                                name
-                        );
-
-                method.setAccessible(
-                        true
-                );
-
-                return new MethodResult(
-                        true,
-                        method.invoke(
-                                instance
-                        )
-                );
-
-            } catch (
-                    NoSuchMethodException e
-            ) {
-
-                current =
-                        current.getSuperclass();
-
-            } catch (Throwable e) {
-
-                return new MethodResult(
-                        false,
-                        null
-                );
-            }
-        }
-
-        return new MethodResult(
-                false,
-                null
-        );
-    }
-
-    /**
-     * ============================================================
-     * 中文名称
-     * ============================================================
-     */
-    private String getChineseEntityName(
-            String entityId,
-            EntityType<?> type
-    ) {
-
-        /*
-         * 第一优先：
-         *
-         * NetCraft 自己的 zh_cn.json。
-         */
-        String translated =
-                readNetCraftChineseName(
-                        entityId
-                );
-
-        if (translated != null &&
-                !translated.isBlank()) {
-
-            return translated;
-        }
-
-        /*
-         * 第二优先：
-         * Minecraft EntityType 描述。
-         */
-        try {
-
-            Component component =
-                    type.getDescription();
-
-            if (component != null) {
-
-                String text =
-                        component.getString();
-
-                if (text != null &&
-                        !text.isBlank()) {
-
-                    return text;
-                }
-            }
-
-        } catch (Throwable ignored) {
-        }
-
-        /*
-         * 最后使用 ID。
-         */
-        return prettifyId(
-                entityId
-        );
-    }
-
-    /**
-     * 从 NetCraft 1.4.18 的
      * assets/netcraft/lang/zh_cn.json
-     * 读取中文名称。
+     *
+     * 如果读不到，则使用 EntityType 的描述 ID。
      */
-    private String readNetCraftChineseName(
-            String entityId
+    private String getEntityChineseName(
+            ResourceLocation id,
+            EntityType<?> type
     ) {
+        try {
+            String translationKey =
+                    type.getDescriptionId();
 
+            String fromLanguage =
+                    readChineseNameFromLanguage(
+                            translationKey
+                    );
+
+            if (fromLanguage != null
+                    && !fromLanguage.isBlank()) {
+
+                return fromLanguage;
+            }
+
+        } catch (Exception ignored) {
+        }
+
+        try {
+            String path =
+                    id.getPath();
+
+            if (path != null
+                    && !path.isBlank()) {
+
+                return path;
+            }
+
+        } catch (Exception ignored) {
+        }
+
+        return id.toString();
+    }
+
+    /**
+     * 从 NetCraft zh_cn.json 读取中文名称。
+     */
+    private String readChineseNameFromLanguage(
+            String translationKey
+    ) {
         if (server == null) {
-
             return null;
         }
 
         try {
-
-            ResourceLocation resource =
+            ResourceLocation languageFile =
                     new ResourceLocation(
-                            NETCRAFT,
+                            "netcraft",
                             "lang/zh_cn.json"
                     );
 
-            Optional<net.minecraft.server.packs.resources.Resource>
-                    optional =
+            var resource =
                     server.getResourceManager()
                             .getResource(
-                                    resource
+                                    languageFile
                             );
 
-            if (optional.isEmpty()) {
-
+            if (resource.isEmpty()) {
                 return null;
             }
 
-            try (
-                    InputStream input =
-                            optional.get()
-                                    .open();
+            try (var inputStream =
+                         resource.get()
+                                 .open()) {
 
-                    InputStreamReader reader =
-                            new InputStreamReader(
-                                    input,
-                                    StandardCharsets.UTF_8
-                            )
-            ) {
-
-                JsonObject json =
-                        JsonParser.parseReader(
-                                reader
-                        ).getAsJsonObject();
-
-                String path =
-                        entityId.substring(
-                                entityId.indexOf(':') + 1
+                String json =
+                        new String(
+                                inputStream.readAllBytes(),
+                                StandardCharsets.UTF_8
                         );
 
-                String key =
-                        "entity."
-                                + NETCRAFT
-                                + "."
-                                + path;
-
-                JsonElement element =
-                        json.get(key);
-
-                if (element != null &&
-                        element.isJsonPrimitive()) {
-
-                    return element.getAsString();
-                }
+                return extractJsonStringValue(
+                        json,
+                        translationKey
+                );
             }
 
-        } catch (Throwable e) {
-
-            LOGGER.debug(
-                    "[NetCraftToolkit] 读取 NetCraft 中文语言文件失败。",
-                    e
-            );
+        } catch (Exception e) {
+            return null;
         }
-
-        return null;
     }
 
-    private String prettifyId(
-            String id
+    /**
+     * 从简单 JSON 对象中读取指定 key。
+     *
+     * 不依赖 Gson，避免额外依赖。
+     */
+    private String extractJsonStringValue(
+            String json,
+            String key
     ) {
-
-        int colon =
-                id.indexOf(':');
-
-        if (colon >= 0) {
-
-            id =
-                    id.substring(
-                            colon + 1
-                    );
+        if (json == null
+                || key == null) {
+            return null;
         }
 
-        String[] parts =
-                id.split("_");
+        String search =
+                "\"" + key + "\"";
+
+        int keyIndex =
+                json.indexOf(search);
+
+        if (keyIndex < 0) {
+            return null;
+        }
+
+        int colon =
+                json.indexOf(
+                        ':',
+                        keyIndex + search.length()
+                );
+
+        if (colon < 0) {
+            return null;
+        }
+
+        int firstQuote =
+                json.indexOf(
+                        '"',
+                        colon + 1
+                );
+
+        if (firstQuote < 0) {
+            return null;
+        }
 
         StringBuilder result =
                 new StringBuilder();
 
-        for (String part : parts) {
+        boolean escaped = false;
 
-            if (part.isBlank()) {
+        for (int i = firstQuote + 1;
+             i < json.length();
+             i++) {
 
-                continue;
-            }
+            char c =
+                    json.charAt(i);
 
-            if (result.length() > 0) {
-
-                result.append(' ');
-            }
-
-            result.append(
-                    Character.toUpperCase(
-                            part.charAt(0)
-                    )
-            );
-
-            if (part.length() > 1) {
-
-                result.append(
-                        part.substring(1)
-                );
-            }
-        }
-
-        return result.toString();
-    }
-
-    /**
-     * ============================================================
-     * 读取配置
-     * ============================================================
-     */
-    private synchronized void readConfig()
-            throws Exception {
-
-        entityAttributes.clear();
-        entityCategories.clear();
-        entityNames.clear();
-        dropConfigs.clear();
-        equipmentOverrides.clear();
-
-        List<String> lines =
-                Files.readAllLines(
-                        configFile,
-                        StandardCharsets.UTF_8
-                );
-
-        String currentCategory = null;
-
-        String currentEntity = null;
-
-        String currentSection = null;
-
-        DropBuilder currentDrop = null;
-
-        List<NetCraftDropManager.DropEntry>
-                currentDropList = null;
-
-        String currentEquipment = null;
-
-        for (String raw : lines) {
-
-            String line =
-                    raw.trim();
-
-            /*
-             * 空行。
-             */
-            if (line.isEmpty()) {
-
-                continue;
-            }
-
-            /*
-             * 注释。
-             */
-            if (line.startsWith("#")) {
-
-                continue;
-            }
-
-            /*
-             * =====================================================
-             * [[boss."xxx".drops.items]]
-             * =====================================================
-             */
-            if (line.startsWith("[[") &&
-                    line.endsWith("]]")) {
-
-                ParsedSection section =
-                        parseSection(
-                                line.substring(
-                                        2,
-                                        line.length() - 2
-                                )
-                        );
-
-                if (section == null) {
-
-                    continue;
+            if (escaped) {
+                switch (c) {
+                    case 'n' -> result.append('\n');
+                    case 'r' -> result.append('\r');
+                    case 't' -> result.append('\t');
+                    case '"' -> result.append('"');
+                    case '\\' -> result.append('\\');
+                    default -> result.append(c);
                 }
 
-                finishDrop(
-                        currentDrop,
-                        currentDropList
-                );
-
-                currentDrop =
-                        new DropBuilder();
-
-                currentDropList =
-                        dropConfigs
-                                .computeIfAbsent(
-                                        section.entityId,
-                                        ignored ->
-                                                new NetCraftDropManager
-                                                        .DropConfig(
-                                                                false,
-                                                                new ArrayList<>()
-                                                        )
-                                )
-                                .entries();
-
-                currentCategory =
-                        section.category;
-
-                currentEntity =
-                        section.entityId;
-
-                currentSection =
-                        "drops.items";
-
-                currentEquipment = null;
-
+                escaped = false;
                 continue;
             }
 
-            /*
-             * =====================================================
-             * [section]
-             * =====================================================
-             */
-            if (line.startsWith("[") &&
-                    line.endsWith("]")) {
-
-                finishDrop(
-                        currentDrop,
-                        currentDropList
-                );
-
-                currentDrop = null;
-                currentDropList = null;
-
-                ParsedSection section =
-                        parseSection(
-                                line.substring(
-                                        1,
-                                        line.length() - 1
-                                )
-                        );
-
-                if (section == null) {
-
-                    currentCategory = null;
-                    currentEntity = null;
-                    currentSection = null;
-                    currentEquipment = null;
-
-                    continue;
-                }
-
-                currentCategory =
-                        section.category;
-
-                currentEntity =
-                        section.entityId;
-
-                currentSection =
-                        section.subSection;
-
-                currentEquipment =
-                        "equipment".equals(
-                                section.category
-                        )
-                                ? section.entityId
-                                : null;
-
-                if (currentEntity != null &&
-                        !"equipment".equals(
-                                currentCategory
-                        )) {
-
-                    entityCategories.put(
-                            currentEntity,
-                            currentCategory
-                    );
-
-                    entityNames.put(
-                            currentEntity,
-                            getChineseEntityNameById(
-                                    currentEntity
-                            )
-                    );
-                }
-
+            if (c == '\\') {
+                escaped = true;
                 continue;
             }
 
-            /*
-             * key=value
-             */
-            int equals =
-                    line.indexOf('=');
-
-            if (equals < 0) {
-
-                continue;
+            if (c == '"') {
+                return result.toString();
             }
 
-            String key =
-                    line.substring(
-                            0,
-                            equals
-                    ).trim();
-
-            String value =
-                    line.substring(
-                            equals + 1
-                    ).trim();
-
-            /*
-             * 去掉行尾注释。
-             */
-            value =
-                    stripInlineComment(
-                            value
-                    );
-
-            /*
-             * =====================================================
-             * 掉落总开关
-             * =====================================================
-             */
-            if ("drops".equals(
-                    currentSection
-            ) &&
-                    "replace".equals(key) &&
-                    currentEntity != null) {
-
-                boolean replace =
-                        Boolean.parseBoolean(
-                                unquote(value)
-                        );
-
-                NetCraftDropManager.DropConfig
-                        old =
-                                dropConfigs.get(
-                                        currentEntity
-                                );
-
-                List<NetCraftDropManager.DropEntry>
-                        list =
-                                old == null
-                                        ? new ArrayList<>()
-                                        : old.entries();
-
-                dropConfigs.put(
-                        currentEntity,
-                        new NetCraftDropManager.DropConfig(
-                                replace,
-                                list
-                        )
-                );
-
-                currentDropList =
-                        list;
-
-                continue;
-            }
-
-            /*
-             * =====================================================
-             * 掉落项目
-             * =====================================================
-             */
-            if ("drops.items".equals(
-                    currentSection
-            ) &&
-                    currentDrop != null) {
-
-                switch (key) {
-
-                    case "item" ->
-                            currentDrop.item =
-                                    unquote(value);
-
-                    case "min_count" ->
-                            currentDrop.minCount =
-                                    parseInt(
-                                            value,
-                                            1
-                                    );
-
-                    case "max_count" ->
-                            currentDrop.maxCount =
-                                    parseInt(
-                                            value,
-                                            1
-                                    );
-
-                    case "chance" ->
-                            currentDrop.chance =
-                                    parseDouble(
-                                            value,
-                                            1.0D
-                                    );
-
-                    default -> {
-                    }
-                }
-
-                continue;
-            }
-
-            /*
-             * =====================================================
-             * 装备
-             * =====================================================
-             */
-            if ("equipment".equals(
-                    currentSection
-            ) &&
-                    currentEquipment != null) {
-
-                Double number =
-                        parseNullableDouble(
-                                value
-                        );
-
-                if (number != null) {
-
-                    equipmentOverrides
-                            .computeIfAbsent(
-                                    currentEquipment,
-                                    ignored ->
-                                            new ConcurrentHashMap<>()
-                            )
-                            .put(
-                                    key,
-                                    number
-                            );
-                }
-
-                continue;
-            }
-
-            /*
-             * =====================================================
-             * 生物属性
-             * =====================================================
-             */
-            if (currentEntity != null &&
-                    isEntityAttribute(key)) {
-
-                Double number =
-                        parseNullableDouble(
-                                value
-                        );
-
-                if (number == null) {
-
-                    continue;
-                }
-
-                entityAttributes
-                        .computeIfAbsent(
-                                currentEntity,
-                                ignored ->
-                                        new ConcurrentHashMap<>()
-                        )
-                        .put(
-                                key,
-                                number
-                        );
-            }
-        }
-
-        /*
-         * 文件结束时最后一个掉落项目。
-         */
-        finishDrop(
-                currentDrop,
-                currentDropList
-        );
-
-        /*
-         * 防止旧配置里出现非 NetCraft。
-         */
-        removeNonNetCraftEntries();
-    }
-
-    /**
-     * 完成一个掉落项目。
-     */
-    private void finishDrop(
-            DropBuilder builder,
-            List<NetCraftDropManager.DropEntry> list
-    ) {
-
-        if (builder == null ||
-                list == null) {
-
-            return;
-        }
-
-        if (builder.item == null ||
-                builder.item.isBlank()) {
-
-            return;
-        }
-
-        int min =
-                Math.max(
-                        1,
-                        builder.minCount
-                );
-
-        int max =
-                Math.max(
-                        min,
-                        builder.maxCount
-                );
-
-        double chance =
-                Math.max(
-                        0D,
-                        Math.min(
-                                1D,
-                                builder.chance
-                        )
-                );
-
-        list.add(
-                new NetCraftDropManager.DropEntry(
-                        builder.item,
-                        min,
-                        max,
-                        chance
-                )
-        );
-    }
-
-    /**
-     * 删除所有非 NetCraft 配置。
-     */
-    private void removeNonNetCraftEntries() {
-
-        entityAttributes.keySet()
-                .removeIf(
-                        id ->
-                                !isNetCraftId(id)
-                );
-
-        entityCategories.keySet()
-                .removeIf(
-                        id ->
-                                !isNetCraftId(id)
-                );
-
-        entityNames.keySet()
-                .removeIf(
-                        id ->
-                                !isNetCraftId(id)
-                );
-
-        dropConfigs.keySet()
-                .removeIf(
-                        id ->
-                                !isNetCraftId(id)
-                );
-    }
-
-    private boolean isNetCraftId(
-            String id
-    ) {
-
-        return id != null &&
-                id.startsWith(
-                        NETCRAFT + ":"
-                );
-    }
-
-    /**
-     * section 解析。
-     */
-    private ParsedSection parseSection(
-            String text
-    ) {
-
-        String body =
-                text.trim();
-
-        /*
-         * equipment."knight.t1.mainhand"
-         */
-        if (body.startsWith(
-                "equipment."
-        )) {
-
-            String rest =
-                    body.substring(
-                            "equipment.".length()
-                    );
-
-            String id =
-                    extractQuoted(
-                            rest
-                    );
-
-            if (id == null) {
-
-                id =
-                        unquote(rest);
-            }
-
-            return new ParsedSection(
-                    "equipment",
-                    id,
-                    "equipment"
-            );
-        }
-
-        String[] categories = {
-                "boss",
-                "elite",
-                "mob"
-        };
-
-        for (String category :
-                categories) {
-
-            String prefix =
-                    category + ".";
-
-            if (!body.startsWith(
-                    prefix
-            )) {
-
-                continue;
-            }
-
-            String rest =
-                    body.substring(
-                            prefix.length()
-                    );
-
-            String entityId =
-                    extractQuoted(
-                            rest
-                    );
-
-            if (entityId == null) {
-
-                return null;
-            }
-
-            int quoteEnd =
-                    findClosingQuote(
-                            rest
-                    );
-
-            String suffix =
-                    quoteEnd >= 0
-                            ? rest.substring(
-                                    quoteEnd + 1
-                            )
-                            : "";
-
-            if (suffix.startsWith(
-                    ".drops.items"
-            )) {
-
-                return new ParsedSection(
-                        category,
-                        entityId,
-                        "drops.items"
-                );
-            }
-
-            if (suffix.startsWith(
-                    ".drops"
-            )) {
-
-                return new ParsedSection(
-                        category,
-                        entityId,
-                        "drops"
-                );
-            }
-
-            return new ParsedSection(
-                    category,
-                    entityId,
-                    "entity"
-            );
+            result.append(c);
         }
 
         return null;
     }
 
     /**
-     * 获取引号中的字符串。
+     * 生成装备配置。
+     *
+     * 这里保留结构，实际 NetCraft 装备数值后续由
+     * EquipmentOverrideWriter / Reflection 负责读取。
      */
-    private String extractQuoted(
-            String text
+    private void generateEquipmentConfig(
+            StringBuilder out
     ) {
+        out.append("# NetCraft 装备属性覆盖\n");
+        out.append("#\n");
+        out.append("# 支持的职业：\n");
+        out.append("# knight\n");
+        out.append("# archer\n");
+        out.append("# mage\n");
+        out.append("# summoner\n");
+        out.append("# dragonknight\n");
+        out.append("# wararcher\n");
+        out.append("#\n");
+        out.append("# 支持位置：\n");
+        out.append("# mainhand / offhand / helmet / chestplate / leggings / boots\n");
+        out.append("#\n");
+        out.append("# 支持属性：\n");
+        out.append("# meleeDamage / rangedDamage / magicDamage\n");
+        out.append("# physicalDefense / magicDefense / health / armor\n");
+        out.append("\n");
 
-        int start =
-                text.indexOf('"');
-
-        if (start < 0) {
-
-            return null;
-        }
-
-        int end =
-                text.indexOf(
-                        '"',
-                        start + 1
-                );
-
-        if (end < 0) {
-
-            return null;
-        }
-
-        return text.substring(
-                start + 1,
-                end
-        );
-    }
-
-    private int findClosingQuote(
-            String text
-    ) {
-
-        int start =
-                text.indexOf('"');
-
-        if (start < 0) {
-
-            return -1;
-        }
-
-        return text.indexOf(
-                '"',
-                start + 1
-        );
+        out.append("# 示例：\n");
+        out.append("# [equipment.\"weapon_knight_t1_mainhand\"]\n");
+        out.append("# meleeDamage = 10\n");
+        out.append("#\n");
+        out.append("# [equipment.\"equipment_knight_t1_helmet\"]\n");
+        out.append("# physicalDefense = 5\n");
+        out.append("# magicDefense = 3\n");
+        out.append("# health = 20\n");
+        out.append("# armor = 2\n");
+        out.append("\n");
     }
 
     /**
-     * 同步掉落管理器。
+     * 获取生物属性配置。
      */
-    private void syncDropManager() {
-
-        NetCraftDropManager manager =
-                NetCraftToolkit.getDropManager();
-
-        if (manager == null) {
-
-            return;
-        }
-
-        manager.clear();
-
-        for (Map.Entry<
-                String,
-                NetCraftDropManager.DropConfig>
-                entry :
-                dropConfigs.entrySet()) {
-
-            if (!isNetCraftId(
-                    entry.getKey()
-            )) {
-
-                continue;
-            }
-
-            manager.setDropConfig(
-                    entry.getKey(),
-                    entry.getValue()
-            );
-        }
-    }
-
-    /**
-     * ============================================================
-     * 对外 API
-     * ============================================================
-     */
-
-    public Map<String, Double>
-    getEntityAttributes(
+    public Map<String, Double> getEntityAttributes(
             String entityId
     ) {
+        Map<String, Double> map =
+                entityAttributes.get(entityId);
 
-        Map<String, Double> values =
-                entityAttributes.get(
-                        entityId
-                );
-
-        if (values == null) {
-
+        if (map == null) {
             return Collections.emptyMap();
         }
 
-        return Collections.unmodifiableMap(
-                values
-        );
+        return Collections.unmodifiableMap(map);
     }
 
-    public Map<String, Double>
-    getEntityConfig(
+    /**
+     * 兼容旧调用名称。
+     */
+    public Map<String, Double> getEntityConfig(
             String entityId
     ) {
-
-        return getEntityAttributes(
-                entityId
-        );
+        return getEntityAttributes(entityId);
     }
 
+    /**
+     * 兼容旧调用名称。
+     */
+    public Map<String, Double> getAttributes(
+            String entityId
+    ) {
+        return getEntityAttributes(entityId);
+    }
+
+    /**
+     * 兼容旧调用名称。
+     */
+    public Map<String, Double> getMobAttributes(
+            String entityId
+    ) {
+        return getEntityAttributes(entityId);
+    }
+
+    /**
+     * 获取分类。
+     */
     public String getEntityCategory(
             String entityId
     ) {
-
         return entityCategories.getOrDefault(
                 entityId,
                 "mob"
         );
     }
 
+    /**
+     * 获取中文名称。
+     */
     public String getEntityName(
             String entityId
     ) {
-
         return entityNames.getOrDefault(
                 entityId,
                 entityId
         );
     }
 
-    public Map<String,
-            NetCraftDropManager.DropConfig>
+    /**
+     * 获取全部掉落配置。
+     */
+    public Map<String, NetCraftDropManager.DropConfig>
     getDropConfigs() {
-
         return Collections.unmodifiableMap(
                 dropConfigs
         );
     }
 
-    public NetCraftDropManager.DropConfig
-    getDropConfig(
+    /**
+     * 获取单个生物掉落配置。
+     */
+    public NetCraftDropManager.DropConfig getDropConfig(
             String entityId
     ) {
-
-        return dropConfigs.get(
-                entityId
-        );
+        return dropConfigs.get(entityId);
     }
 
-    public Map<String,
-            Map<String, Double>>
+    /**
+     * 获取装备覆盖配置。
+     */
+    public Map<String, Map<String, Double>>
     getEquipmentOverrides() {
-
         return Collections.unmodifiableMap(
                 equipmentOverrides
         );
     }
 
-    public Map<String,
-            Map<String, Double>>
+    /**
+     * 兼容旧代码。
+     */
+    public Map<String, Map<String, Double>>
     getEquipmentDefaults() {
-
         return Collections.emptyMap();
     }
 
-    public Set<String>
-    getEquipmentStructNames() {
-
-        return Collections.unmodifiableSet(
+    /**
+     * 获取装备结构名称。
+     */
+    public List<String> getEquipmentStructNames() {
+        return new ArrayList<>(
                 equipmentOverrides.keySet()
         );
     }
 
     /**
-     * ============================================================
-     * 工具方法
-     * ============================================================
+     * 清空配置。
      */
-
-    private boolean isEntityAttribute(
-            String key
-    ) {
-
-        return switch (key) {
-
-            case "max_health",
-                 "attack_damage",
-                 "movement_speed",
-                 "armor",
-                 "attack_speed",
-                 "knockback_resistance",
-                 "follow_range",
-                 "base_damage",
-                 "base_defense" ->
-                    true;
-
-            default ->
-                    false;
-        };
-    }
-
-    private String stripInlineComment(
-            String value
-    ) {
-
-        boolean quoted = false;
-
-        for (int i = 0;
-             i < value.length();
-             i++) {
-
-            char c =
-                    value.charAt(i);
-
-            if (c == '"') {
-
-                quoted = !quoted;
-
-                continue;
-            }
-
-            if (c == '#' &&
-                    !quoted) {
-
-                return value
-                        .substring(
-                                0,
-                                i
-                        )
-                        .trim();
-            }
-        }
-
-        return value;
-    }
-
-    private String unquote(
-            String value
-    ) {
-
-        String result =
-                value.trim();
-
-        if (result.length() >= 2 &&
-                result.startsWith("\"") &&
-                result.endsWith("\"")) {
-
-            return result.substring(
-                    1,
-                    result.length() - 1
-            );
-        }
-
-        return result;
-    }
-
-    private int parseInt(
-            String value,
-            int fallback
-    ) {
-
-        try {
-
-            return Integer.parseInt(
-                    unquote(value)
-            );
-
-        } catch (Exception e) {
-
-            return fallback;
-        }
-    }
-
-    private double parseDouble(
-            String value,
-            double fallback
-    ) {
-
-        Double parsed =
-                parseNullableDouble(
-                        value
-                );
-
-        return parsed == null
-                ? fallback
-                : parsed;
-    }
-
-    private Double parseNullableDouble(
-            String value
-    ) {
-
-        try {
-
-            return Double.parseDouble(
-                    unquote(value)
-            );
-
-        } catch (Exception e) {
-
-            return null;
-        }
-    }
-
-    private String formatNumber(
-            double value
-    ) {
-
-        if (Double.isNaN(value) ||
-                Double.isInfinite(value)) {
-
-            return "-1.0";
-        }
-
-        if (value == Math.rint(value)) {
-
-            return String.format(
-                    Locale.ROOT,
-                    "%.1f",
-                    value
-            );
-        }
-
-        String result =
-                String.format(
-                        Locale.ROOT,
-                        "%.6f",
-                        value
-                );
-
-        while (result.endsWith("0")) {
-
-            result =
-                    result.substring(
-                            0,
-                            result.length() - 1
-                    );
-        }
-
-        if (result.endsWith(".")) {
-
-            result += "0";
-        }
-
-        return result;
-    }
-
-    private String getChineseEntityNameById(
-            String entityId
-    ) {
-
-        ResourceLocation id =
-                ResourceLocation.tryParse(
-                        entityId
-                );
-
-        if (id == null) {
-
-            return entityId;
-        }
-
-        EntityType<?> type =
-                BuiltInRegistries
-                        .ENTITY_TYPE
-                        .get(id);
-
-        if (type == null) {
-
-            return entityId;
-        }
-
-        return getChineseEntityName(
-                entityId,
-                type
-        );
-    }
-
-    /**
-     * 清理。
-     */
-    public void clear() {
-
+    public synchronized void clear() {
         entityAttributes.clear();
         entityCategories.clear();
         entityNames.clear();
         dropConfigs.clear();
         equipmentOverrides.clear();
+
+        generatedInitialConfig = false;
     }
 
-    @SubscribeEvent
-    public void onServerStopping(
-            ServerStoppingEvent event
+    /**
+     * 删除配置文件。
+     */
+    public synchronized void resetConfigFile() {
+        if (configFile == null) {
+            return;
+        }
+
+        try {
+            Files.deleteIfExists(
+                    configFile
+            );
+
+            NetCraftToolkit.LOGGER.info(
+                    "[NetCraftToolkit] Config file deleted."
+            );
+
+        } catch (IOException e) {
+            NetCraftToolkit.LOGGER.error(
+                    "[NetCraftToolkit] Failed to delete config file.",
+                    e
+            );
+        }
+    }
+
+    /**
+     * 去除行尾注释。
+     */
+    private String removeTrailingComment(
+            String line
     ) {
+        boolean quoted = false;
+        boolean escaped = false;
 
-        stopWatching();
+        for (int i = 0; i < line.length(); i++) {
+            char c =
+                    line.charAt(i);
 
-        clear();
+            if (escaped) {
+                escaped = false;
+                continue;
+            }
+
+            if (c == '\\'
+                    && quoted) {
+                escaped = true;
+                continue;
+            }
+
+            if (c == '"') {
+                quoted = !quoted;
+                continue;
+            }
+
+            if (c == '#'
+                    && !quoted) {
+                return line.substring(
+                        0,
+                        i
+                );
+            }
+        }
+
+        return line;
     }
 
     /**
-     * 生物信息。
+     * 查找不在引号里的 =。
      */
-    private static final class EntityInfo {
+    private int findEqualsOutsideQuotes(
+            String line
+    ) {
+        boolean quoted = false;
+        boolean escaped = false;
 
-        private final String id;
+        for (int i = 0; i < line.length(); i++) {
+            char c =
+                    line.charAt(i);
 
-        private final String displayName;
+            if (escaped) {
+                escaped = false;
+                continue;
+            }
 
-        private final String category;
+            if (c == '\\'
+                    && quoted) {
+                escaped = true;
+                continue;
+            }
 
-        private final Map<String, Double>
-                defaults;
+            if (c == '"') {
+                quoted = !quoted;
+                continue;
+            }
 
-        private final int baseDamage;
+            if (c == '='
+                    && !quoted) {
+                return i;
+            }
+        }
 
-        private final int baseDefense;
+        return -1;
+    }
 
-        private EntityInfo(
-                String id,
-                String displayName,
-                String category,
-                Map<String, Double> defaults,
-                int baseDamage,
-                int baseDefense
-        ) {
+    /**
+     * 去掉字符串两边的引号。
+     */
+    private String stripQuotes(
+            String value
+    ) {
+        if (value == null) {
+            return "";
+        }
 
-            this.id = id;
-            this.displayName = displayName;
-            this.category = category;
-            this.defaults = defaults;
-            this.baseDamage = baseDamage;
-            this.baseDefense = baseDefense;
+        String result =
+                value.trim();
+
+        if (result.length() >= 2
+                && result.startsWith("\"")
+                && result.endsWith("\"")) {
+
+            result =
+                    result.substring(
+                            1,
+                            result.length() - 1
+                    );
+        }
+
+        return result;
+    }
+
+    /**
+     * 解析整数。
+     */
+    private Integer parseInteger(
+            String value
+    ) {
+        if (value == null) {
+            return null;
+        }
+
+        try {
+            return Integer.parseInt(
+                    stripQuotes(value).trim()
+            );
+
+        } catch (NumberFormatException e) {
+            return null;
         }
     }
 
     /**
-     * TOML section。
+     * 解析 double。
      */
-    private static final class ParsedSection {
+    private Double parseDouble(
+            String value
+    ) {
+        if (value == null) {
+            return null;
+        }
 
-        private final String category;
+        try {
+            return Double.parseDouble(
+                    stripQuotes(value).trim()
+            );
 
-        private final String entityId;
-
-        private final String subSection;
-
-        private ParsedSection(
-                String category,
-                String entityId,
-                String subSection
-        ) {
-
-            this.category = category;
-            this.entityId = entityId;
-            this.subSection = subSection;
+        } catch (NumberFormatException e) {
+            return null;
         }
     }
 
     /**
-     * 临时掉落项目。
+     * 解析 boolean。
      */
-    private static final class DropBuilder {
-
-        private String item;
-
-        private int minCount = 1;
-
-        private int maxCount = 1;
-
-        private double chance = 1.0D;
-    }
-
-    /**
-     * 反射结果。
-     */
-    private static final class MethodResult {
-
-        private final boolean success;
-
-        private final Object value;
-
-        private MethodResult(
-                boolean success,
-                Object value
-        ) {
-
-            this.success = success;
-            this.value = value;
+    private Boolean parseBoolean(
+            String value
+    ) {
+        if (value == null) {
+            return null;
         }
+
+        String clean =
+                stripQuotes(value)
+                        .trim()
+                        .toLowerCase(
+                                Locale.ROOT
+                        );
+
+        if ("true".equals(clean)) {
+            return true;
+        }
+
+        if ("false".equals(clean)) {
+            return false;
+        }
+
+        return null;
     }
 }
