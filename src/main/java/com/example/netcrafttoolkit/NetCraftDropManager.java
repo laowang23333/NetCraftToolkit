@@ -230,12 +230,20 @@ public class NetCraftDropManager {
          * 只有确认至少有一个有效自定义物品后才清空原始掉落。
          */
         if (config.replaceDrops()) {
-            int originalCount = event.getDrops().size();
             event.getDrops().clear();
+
+            /*
+             * replace=true：
+             * 不只是清空当前掉落列表，还要取消整个 LivingDropsEvent。
+             *
+             * 否则其他掉落监听器仍可能继续处理这个死亡事件，
+             * 导致 Boss 原本的掉落再次出现。
+             */
+            event.setCanceled(true);
+
             NetCraftToolkit.LOGGER.info(
-                    "[NetCraftToolkit] Original drops cleared for {}: {} -> 0",
-                    entityId,
-                    originalCount
+                    "[NetCraftToolkit] Original drops event canceled for replacement: entity={}",
+                    entityId
             );
         }
 
@@ -318,10 +326,11 @@ public class NetCraftDropManager {
             spawnDrop(entity, stack, event);
 
             NetCraftToolkit.LOGGER.info(
-                    "[NetCraftToolkit] Custom drop spawned directly: entity={}, item={}, amount={}",
+                    "[NetCraftToolkit] Custom drop added: entity={}, item={}, amount={}, eventDropsNow={}",
                     entityId,
                     entry.itemId(),
-                    amount
+                    amount,
+                    event.getDrops().size()
             );
         }
     }
@@ -399,30 +408,7 @@ public class NetCraftDropManager {
                 (ThreadLocalRandom.current().nextDouble() - 0.5D) * 0.1D
         );
 
-        /*
-         * 关键修复：
-         *
-         * 不再把自定义掉落物放进 LivingDropsEvent#getDrops()。
-         *
-         * 某些 NetCraft 生物自己的死亡掉落处理会继续操作这个列表，
-         * 导致我们明明已经 add 进去，最终世界里仍然看不到物品。
-         *
-         * 这里直接把 ItemEntity 加入服务器世界，
-         * 从事件列表中彻底脱离自定义掉落物的生命周期。
-         *
-         * replace=true 时，原始事件掉落已经在上面被清空，
-         * 因此不会再产生原始掉落。
-         */
-        boolean added = level.addFreshEntity(itemEntity);
-
-        if (!added) {
-            NetCraftToolkit.LOGGER.warn(
-                    "[NetCraftToolkit] Failed to spawn custom drop into world: entity={}, item={}, amount={}",
-                    entity.getType(),
-                    stack.getItem(),
-                    stack.getCount()
-            );
-        }
+        event.getDrops().add(itemEntity);
     }
 
     /**
