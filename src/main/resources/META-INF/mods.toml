@@ -14,7 +14,7 @@ NetCraft Toolkit - NetCraft 生物属性、掉落与称号工具。
 [[dependencies.netcrafttoolkit]]
 modId="forge"
 mandatory=true
-versionRange="[47.4.13,)"
+versionRange="[47.4.10,)"
 ordering="NONE"
 side="BOTH"
 
