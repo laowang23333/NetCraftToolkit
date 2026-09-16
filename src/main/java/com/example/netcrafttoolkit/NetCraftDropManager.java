@@ -6,10 +6,11 @@ import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.item.ItemEntity;
+import net.minecraftforge.event.entity.EntityJoinLevelEvent;
+import net.minecraftforge.event.entity.living.LivingDeathEvent;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraftforge.event.entity.living.LivingDropsEvent;
-import net.minecraftforge.eventbus.api.EventPriority;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.registries.ForgeRegistries;
 
@@ -17,6 +18,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
 
@@ -25,10 +27,11 @@ import java.util.concurrent.ThreadLocalRandom;
  *
  * 当前职责：
  * 1. 保存每个 NetCraft 生物的自定义掉落配置
- * 2. 处理 LivingDropsEvent
- * 3. 根据概率生成掉落物
- * 4. 支持最小/最大数量
- * 5. 支持是否替换原版/NetCraft原有掉落
+ * 2. 处理 LivingDeathEvent / LivingDropsEvent / EntityJoinLevelEvent
+ * 3. 拦截 NetCraft Boss 自己直接生成的死亡掉落
+ * 4. 根据概率生成掉落物
+ * 5. 支持最小/最大数量
+ * 6. 支持是否替换原版/NetCraft原有掉落
  *
  * 注意：
  * 这个类不直接依赖 NetCraft 的 Java 类。
@@ -44,6 +47,37 @@ public class NetCraftDropManager {
      */
     private final Map<String, DropConfig> dropConfigs =
             new ConcurrentHashMap<>();
+
+    /**
+     * replace=true 时，Boss 死亡前就登记一个“死亡掉落拦截窗口”。
+     *
+     * 原因：NetCraft BossBase 的部分死亡掉落不是进入 LivingDropsEvent 的
+     * capturedDrops，而是直接 ServerLevel.addFreshEntity(...)。
+     * EntityJoinLevelEvent 才能在这些 ItemEntity 真正进入世界时拦截。
+     */
+    private final Map<UUID, SuppressionWindow> suppressionWindows =
+            new ConcurrentHashMap<>();
+
+    /**
+     * 自定义掉落的标记。
+     *
+     * replace=true 时我们需要直接把自定义物品加入世界，
+     * 但它们也会触发 EntityJoinLevelEvent，所以必须标记后放行。
+     */
+    private static final String CUSTOM_DROP_TAG =
+            "NetCraftToolkitCustomDrop";
+
+    /**
+     * NetCraft Boss 原始直接掉落的短暂拦截窗口。
+     */
+    private record SuppressionWindow(
+            ServerLevel level,
+            double x,
+            double y,
+            double z,
+            long expireTick
+    ) {
+    }
 
     /**
      * 注册/更新一个生物的掉落配置。
@@ -74,28 +108,6 @@ public class NetCraftDropManager {
     }
 
     /**
-     * 兼容旧调用方式。
-     *
-     * 如果其他旧代码仍然直接传入 DropConfig，
-     * 这里会自动拆开为当前 setDropConfig 的三个参数。
-     */
-    public void setDropConfig(
-            String entityId,
-            DropConfig config
-    ) {
-        if (config == null) {
-            removeDropConfig(entityId);
-            return;
-        }
-
-        setDropConfig(
-                entityId,
-                config.replaceDrops(),
-                config.entries()
-        );
-    }
-
-    /**
      * 删除一个生物的掉落配置。
      */
     public void removeDropConfig(String entityId) {
@@ -111,6 +123,7 @@ public class NetCraftDropManager {
      */
     public void clear() {
         dropConfigs.clear();
+        suppressionWindows.clear();
     }
 
     /**
@@ -135,9 +148,141 @@ public class NetCraftDropManager {
     }
 
     /**
+     * 在 LivingDropsEvent 之前登记 Boss 的死亡掉落拦截。
+     *
+     * LivingDeathEvent 更早触发。这样即使 NetCraft Boss 在自己的死亡流程里
+     * 直接调用 ServerLevel.addFreshEntity(ItemEntity)，我们也能在
+     * EntityJoinLevelEvent 中把这批原始 ItemEntity 拦下来。
+     */
+    @SubscribeEvent
+    public void onLivingDeath(LivingDeathEvent event) {
+        if (event == null) {
+            return;
+        }
+
+        LivingEntity entity = event.getEntity();
+
+        if (entity == null || entity.level().isClientSide()) {
+            return;
+        }
+
+        String entityId = getEntityId(entity);
+
+        if (entityId == null || !entityId.startsWith("netcraft:")) {
+            return;
+        }
+
+        DropConfig config = dropConfigs.get(entityId);
+
+        if (config == null
+                || !config.replaceDrops()
+                || config.entries().isEmpty()) {
+            return;
+        }
+
+        if (!(entity.level() instanceof ServerLevel level)) {
+            return;
+        }
+
+        long expireTick = level.getGameTime() + 10L;
+
+        suppressionWindows.put(
+                entity.getUUID(),
+                new SuppressionWindow(
+                        level,
+                        entity.getX(),
+                        entity.getY(),
+                        entity.getZ(),
+                        expireTick
+                )
+        );
+
+        NetCraftToolkit.LOGGER.info(
+                "[NetCraftToolkit] Registered direct-drop suppression: entity={}, expireTick={}",
+                entityId,
+                expireTick
+        );
+    }
+
+    /**
+     * 拦截 NetCraft Boss 自己直接加入世界的原始 ItemEntity。
+     *
+     * 这里只处理 replace=true 的 Boss 死亡窗口，
+     * 不会全局清理 ItemEntity。
+     * 玩家丢出的物品通常带有 thrower UUID，因此明确放行。
+     */
+    @SubscribeEvent
+    public void onEntityJoinLevel(EntityJoinLevelEvent event) {
+        if (event == null || event.getLevel().isClientSide()) {
+            return;
+        }
+
+        Entity entity = event.getEntity();
+
+        if (!(entity instanceof ItemEntity itemEntity)) {
+            return;
+        }
+
+        /*
+         * 自定义掉落由本管理器自己生成，必须放行。
+         */
+        if (itemEntity.getPersistentData().getBoolean(CUSTOM_DROP_TAG)) {
+            return;
+        }
+
+        /*
+         * 玩家丢出的物品不要拦。
+         */
+        if (itemEntity.getThrower() != null) {
+            return;
+        }
+
+        long now = event.getLevel().getGameTime();
+
+        for (Map.Entry<UUID, SuppressionWindow> entry
+                : suppressionWindows.entrySet()) {
+
+            SuppressionWindow window = entry.getValue();
+
+            if (window == null || now > window.expireTick()) {
+                suppressionWindows.remove(entry.getKey(), window);
+                continue;
+            }
+
+            if (window.level() != event.getLevel()) {
+                continue;
+            }
+
+            /*
+             * NetCraft Boss 的直接掉落是在 Boss 所在位置生成的。
+             * 控制在 4 格半径内，避免影响远处正常物品。
+             */
+            double dx = itemEntity.getX() - window.x();
+            double dy = itemEntity.getY() - window.y();
+            double dz = itemEntity.getZ() - window.z();
+
+            if (dx * dx + dy * dy + dz * dz > 16.0D) {
+                continue;
+            }
+
+            event.setCanceled(true);
+
+            NetCraftToolkit.LOGGER.info(
+                    "[NetCraftToolkit] Blocked NetCraft direct death drop: item={}, pos=({}, {}, {})",
+                    itemEntity.getItem().getItem(),
+                    itemEntity.getX(),
+                    itemEntity.getY(),
+                    itemEntity.getZ()
+            );
+
+            return;
+        }
+    }
+
+    /**
      * 处理生物死亡掉落。
      */
-    @SubscribeEvent(priority = EventPriority.LOWEST)
+    @SubscribeEvent
     public void onLivingDrops(LivingDropsEvent event) {
 
         LivingEntity entity = event.getEntity();
@@ -171,79 +316,29 @@ public class NetCraftDropManager {
 
         DropConfig config = dropConfigs.get(entityId);
 
-        NetCraftToolkit.LOGGER.info(
-                "[NetCraftToolkit] Drop event: entity={}, configured={}, existingDrops={}",
-                entityId,
-                config != null,
-                event.getDrops().size()
-        );
-
         if (config == null || config.entries().isEmpty()) {
-            if (config == null) {
-                NetCraftToolkit.LOGGER.info(
-                        "[NetCraftToolkit] No custom drop config for {}.",
-                        entityId
-                );
-            }
-            return;
-        }
-
-        NetCraftToolkit.LOGGER.info(
-                "[NetCraftToolkit] Custom drops matched: entity={}, replace={}, entries={}",
-                entityId,
-                config.replaceDrops(),
-                config.entries().size()
-        );
-
-        /*
-         * 先验证配置里至少有一个可以实际生成的物品。
-         *
-         * 这样 replace = true 时，如果物品 ID 写错，
-         * 不会先把原版掉落清空，最后变成“什么都不掉”。
-         */
-        boolean hasValidItem = false;
-
-        for (DropEntry entry : config.entries()) {
-            if (entry == null
-                    || entry.itemId() == null
-                    || entry.itemId().isBlank()
-                    || entry.chance() <= 0.0D) {
-                continue;
-            }
-
-            if (findItem(entry.itemId()) != null) {
-                hasValidItem = true;
-                break;
-            }
-        }
-
-        if (!hasValidItem) {
-            NetCraftToolkit.LOGGER.warn(
-                    "[NetCraftToolkit] No valid custom drop item for {}. Original drops were kept.",
-                    entityId
-            );
             return;
         }
 
         /*
          * 如果配置为替换原有掉落，
-         * 只有确认至少有一个有效自定义物品后才清空原始掉落。
+         * 先清掉事件当前的掉落。
          */
         if (config.replaceDrops()) {
+            int before = event.getDrops().size();
             event.getDrops().clear();
 
             /*
-             * replace=true：
-             * 不只是清空当前掉落列表，还要取消整个 LivingDropsEvent。
-             *
-             * 否则其他掉落监听器仍可能继续处理这个死亡事件，
-             * 导致 Boss 原本的掉落再次出现。
+             * 取消 Forge 最终把 capturedDrops 加入世界的步骤。
+             * NetCraft 自己直接 addFreshEntity 的掉落则由
+             * onEntityJoinLevel() 拦截。
              */
             event.setCanceled(true);
 
             NetCraftToolkit.LOGGER.info(
-                    "[NetCraftToolkit] Original drops event canceled for replacement: entity={}",
-                    entityId
+                    "[NetCraftToolkit] Original drops canceled: entity={}, existingDrops={}",
+                    entityId,
+                    before
             );
         }
 
@@ -270,19 +365,11 @@ public class NetCraftDropManager {
             double chance = entry.chance();
 
             if (chance <= 0.0D) {
-                NetCraftToolkit.LOGGER.info(
-                        "[NetCraftToolkit] Drop skipped: entity={}, item={}, chance={}",
-                        entityId, entry.itemId(), chance
-                );
                 continue;
             }
 
             if (chance < 1.0D) {
-                if (ThreadLocalRandom.current().nextDouble() >= chance) {
-                    NetCraftToolkit.LOGGER.info(
-                            "[NetCraftToolkit] Drop chance failed: entity={}, item={}, chance={}",
-                            entityId, entry.itemId(), chance
-                    );
+                if (ThreadLocalRandom.current().nextDouble() > chance) {
                     continue;
                 }
             }
@@ -314,8 +401,7 @@ public class NetCraftDropManager {
 
             if (item == null) {
                 NetCraftToolkit.LOGGER.warn(
-                        "[NetCraftToolkit] Unknown drop item for {}: {}",
-                        entityId,
+                        "[NetCraftToolkit] Unknown drop item: {}",
                         entry.itemId()
                 );
                 continue;
@@ -323,15 +409,7 @@ public class NetCraftDropManager {
 
             ItemStack stack = new ItemStack(item, amount);
 
-            spawnDrop(entity, stack, event);
-
-            NetCraftToolkit.LOGGER.info(
-                    "[NetCraftToolkit] Custom drop added: entity={}, item={}, amount={}, eventDropsNow={}",
-                    entityId,
-                    entry.itemId(),
-                    amount,
-                    event.getDrops().size()
-            );
+            spawnDrop(entity, stack);
         }
     }
 
@@ -378,8 +456,7 @@ public class NetCraftDropManager {
      */
     private void spawnDrop(
             LivingEntity entity,
-            ItemStack stack,
-            LivingDropsEvent event
+            ItemStack stack
     ) {
 
         if (stack.isEmpty()) {
@@ -408,7 +485,30 @@ public class NetCraftDropManager {
                 (ThreadLocalRandom.current().nextDouble() - 0.5D) * 0.1D
         );
 
-        event.getDrops().add(itemEntity);
+        /*
+         * 这个 ItemEntity 是 Toolkit 自己生成的，
+         * 必须跳过死亡原始掉落拦截器。
+         */
+        itemEntity.getPersistentData().putBoolean(
+                CUSTOM_DROP_TAG,
+                true
+        );
+
+        boolean added = level.addFreshEntity(itemEntity);
+
+        if (!added) {
+            NetCraftToolkit.LOGGER.warn(
+                    "[NetCraftToolkit] Failed to spawn custom drop: item={}, amount={}",
+                    stack.getItem(),
+                    stack.getCount()
+            );
+        } else {
+            NetCraftToolkit.LOGGER.info(
+                    "[NetCraftToolkit] Custom drop spawned directly: item={}, amount={}",
+                    stack.getItem(),
+                    stack.getCount()
+            );
+        }
     }
 
     /**
