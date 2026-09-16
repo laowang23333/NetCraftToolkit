@@ -12,6 +12,7 @@ import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraftforge.event.entity.living.LivingDropsEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
+import net.minecraftforge.fml.util.ObfuscationReflectionHelper;
 import net.minecraftforge.registries.ForgeRegistries;
 
 import java.util.ArrayList;
@@ -211,6 +212,28 @@ public class NetCraftDropManager {
      * 不会全局清理 ItemEntity。
      * 玩家丢出的物品通常带有 thrower UUID，因此明确放行。
      */
+    /**
+     * Forge 1.20.1 的 ItemEntity 有 thrower 字段，但没有公开 getThrower()。
+     *
+     * 使用 Forge 的 ObfuscationReflectionHelper 读取 SRG 字段名，
+     * 避免直接调用不存在的 getThrower() 导致编译失败。
+     */
+    private boolean hasThrower(ItemEntity itemEntity) {
+        try {
+            UUID thrower = ObfuscationReflectionHelper.getPrivateValue(
+                    ItemEntity.class,
+                    itemEntity,
+                    "f_31988_"
+            );
+            return thrower != null;
+        } catch (Throwable ignored) {
+            /*
+             * 读取失败时不因为保护逻辑本身导致服务器崩溃。
+             */
+            return false;
+        }
+    }
+
     @SubscribeEvent
     public void onEntityJoinLevel(EntityJoinLevelEvent event) {
         if (event == null || event.getLevel().isClientSide()) {
@@ -233,7 +256,7 @@ public class NetCraftDropManager {
         /*
          * 玩家丢出的物品不要拦。
          */
-        if (itemEntity.getThrower() != null) {
+        if (hasThrower(itemEntity)) {
             return;
         }
 
