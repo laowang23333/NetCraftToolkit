@@ -73,6 +73,28 @@ public class NetCraftDropManager {
     }
 
     /**
+     * 兼容旧调用方式。
+     *
+     * 如果其他旧代码仍然直接传入 DropConfig，
+     * 这里会自动拆开为当前 setDropConfig 的三个参数。
+     */
+    public void setDropConfig(
+            String entityId,
+            DropConfig config
+    ) {
+        if (config == null) {
+            removeDropConfig(entityId);
+            return;
+        }
+
+        setDropConfig(
+                entityId,
+                config.replaceDrops(),
+                config.entries()
+        );
+    }
+
+    /**
      * 删除一个生物的掉落配置。
      */
     public void removeDropConfig(String entityId) {

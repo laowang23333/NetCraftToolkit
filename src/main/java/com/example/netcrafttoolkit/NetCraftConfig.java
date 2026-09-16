@@ -5,6 +5,7 @@ import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.ai.attributes.Attribute;
 import net.minecraft.world.entity.ai.attributes.AttributeSupplier;
+import net.minecraft.world.entity.ai.attributes.DefaultAttributes;
 import net.minecraft.world.entity.ai.attributes.Attributes;
 import net.minecraftforge.event.server.ServerStoppingEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
@@ -1031,9 +1032,17 @@ public class NetCraftConfig {
                 NetCraftDropManager.DropConfig> entry
                 : dropConfigs.entrySet()) {
 
+            NetCraftDropManager.DropConfig config =
+                    entry.getValue();
+
+            if (config == null) {
+                continue;
+            }
+
             manager.setDropConfig(
                     entry.getKey(),
-                    entry.getValue()
+                    config.replaceDrops(),
+                    config.entries()
             );
         }
 
@@ -1122,13 +1131,10 @@ public class NetCraftConfig {
             StringBuilder out,
             String category
     ) {
-        for (Map.Entry<
-                ResourceLocation,
-                EntityType<?>> entry
-                : ForgeRegistries.ENTITY_TYPES.getEntries()) {
+        for (var entry : ForgeRegistries.ENTITY_TYPES.getEntries()) {
 
             ResourceLocation id =
-                    entry.getKey();
+                    entry.getKey().location();
 
             /*
              * 只扫描 NetCraft。
@@ -1231,8 +1237,18 @@ public class NetCraftConfig {
             EntityType<?> type
     ) {
         try {
-            AttributeSupplier supplier =
-                    type.getAttributes();
+            AttributeSupplier supplier = null;
+
+            /*
+             * 1.20.1 中 EntityType 本身没有 getAttributes()。
+             * 默认属性由 DefaultAttributes 统一保存。
+             */
+            if (DefaultAttributes.hasSupplier(type)) {
+                @SuppressWarnings("unchecked")
+                EntityType<? extends net.minecraft.world.entity.LivingEntity> livingType =
+                        (EntityType<? extends net.minecraft.world.entity.LivingEntity>) (EntityType<?>) type;
+                supplier = DefaultAttributes.getSupplier(livingType);
+            }
 
             if (supplier == null) {
                 writeDefaultUnknownAttributes(out);

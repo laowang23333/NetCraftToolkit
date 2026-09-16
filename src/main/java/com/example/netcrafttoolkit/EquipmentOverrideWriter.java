@@ -76,7 +76,7 @@ public class EquipmentOverrideWriter {
         /*
          * 获取装备覆盖配置。
          */
-        Map<String, Map<String, Integer>> overrides =
+        Map<String, Map<String, Double>> overrides =
                 config.getEquipmentOverrides();
 
         if (overrides == null || overrides.isEmpty()) {
@@ -247,12 +247,29 @@ public class EquipmentOverrideWriter {
                                         + "."
                                         + curSlot;
 
-                        Map<String, Integer> values =
+                        Map<String, Double> values =
                                 overrides.get(mapKey);
+
+                        /*
+                         * NetCraftConfig 当前保存的是：
+                         *
+                         * [equipment."weapon_knight_t1_mainhand"]
+                         *
+                         * 而 serverconfig 使用：
+                         *
+                         * [equipmentStat.t1.knight.mainhand]
+                         *
+                         * 所以同时支持两种 key。
+                         */
+                        if (values == null) {
+                            String equipmentId =
+                                    buildEquipmentId(curTier, curJob, curSlot);
+                            values = overrides.get(equipmentId);
+                        }
 
                         if (values != null) {
 
-                            Integer value =
+                            Double value =
                                     values.get(key);
 
                             /*
@@ -272,7 +289,7 @@ public class EquipmentOverrideWriter {
                                         indent
                                                 + key
                                                 + " = "
-                                                + value
+                                                + formatNumber(value)
                                 );
 
                                 writeCount++;
@@ -342,6 +359,52 @@ public class EquipmentOverrideWriter {
                     e
             );
         }
+    }
+
+    /**
+     * 根据 serverconfig 的 tier/job/slot 反向匹配
+     * NetCraftConfig 中的 equipment ID。
+     */
+    private static String buildEquipmentId(
+            String tier,
+            String job,
+            String slot
+    ) {
+        if (tier == null || job == null || slot == null) {
+            return null;
+        }
+
+        String prefix =
+                isMainHandOrOffHand(slot)
+                        ? "weapon_"
+                        : "equipment_";
+
+        return prefix + job + "_" + tier + "_" + slot;
+    }
+
+    private static boolean isMainHandOrOffHand(String slot) {
+        return "mainhand".equalsIgnoreCase(slot)
+                || "offhand".equalsIgnoreCase(slot);
+    }
+
+    /**
+     * TOML 数值格式化：
+     * 整数保持整数，小数保留小数部分。
+     */
+    private static String formatNumber(Double value) {
+        if (value == null) {
+            return "0";
+        }
+
+        if (value.isNaN() || value.isInfinite()) {
+            return "0";
+        }
+
+        if (value.doubleValue() == Math.rint(value.doubleValue())) {
+            return Long.toString(value.longValue());
+        }
+
+        return Double.toString(value);
     }
 
     /**
