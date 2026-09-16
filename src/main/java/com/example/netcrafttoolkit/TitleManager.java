@@ -369,6 +369,52 @@ public class TitleManager {
         }
     }
 
+    /** 根据称号 ID 获取当前显示文本。 */
+    public synchronized String getTitleText(String titleId) {
+        if (titleId == null || titleId.isBlank()) {
+            return null;
+        }
+
+        NetCraftConfig config = NetCraftToolkit.getConfig();
+        if (config != null) {
+            String text = config.getTitleDefinitions().get(titleId);
+            if (text != null) {
+                return text;
+            }
+        }
+
+        String custom = customTitles.get(titleId);
+        if (custom != null) {
+            return custom;
+        }
+
+        // 兼容旧数据：如果存储的不是 ID 而是原始文本，则直接返回。
+        return titleId;
+    }
+
+    /** 当前配置中的称号定义。 */
+    public synchronized Map<String, String> getDefinitions() {
+        Map<String, String> result = new LinkedHashMap<>();
+        NetCraftConfig config = NetCraftToolkit.getConfig();
+        if (config != null) {
+            result.putAll(config.getTitleDefinitions());
+        }
+        result.putAll(customTitles);
+        return result;
+    }
+
+    /** 配置热重载时同步称号定义，并清理已失效的在线显示。 */
+    public synchronized void syncDefinitions(Map<String, String> definitions) {
+        if (definitions == null) {
+            return;
+        }
+        if (server != null) {
+            for (ServerPlayer player : server.getPlayerList().getPlayers()) {
+                applyName(player);
+            }
+        }
+    }
+
     /**
      * 解析自定义称号注册表。
      *
@@ -1055,6 +1101,26 @@ public class TitleManager {
         );
 
         return result;
+    }
+
+    /**
+     * 将当前缓冲区里的普通文本按照当前样式追加到结果组件，并清空缓冲区。
+     */
+    private static void flushPlain(
+            MutableComponent result,
+            StringBuilder plain,
+            Style style
+    ) {
+        if (plain.length() == 0) {
+            return;
+        }
+
+        result.append(
+                Component.literal(plain.toString())
+                        .withStyle(style)
+        );
+
+        plain.setLength(0);
     }
 
     /**
