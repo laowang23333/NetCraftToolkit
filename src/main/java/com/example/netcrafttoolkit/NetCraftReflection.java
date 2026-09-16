@@ -1,67 +1,69 @@
 package com.example.netcrafttoolkit;
 
 import com.mojang.logging.LogUtils;
-import net.minecraft.world.entity.LivingEntity;
 import org.slf4j.Logger;
 
-import java.lang.reflect.*;
-import java.util.*;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
+import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
+/**
+ * NetCraft 反射兼容层。
+ *
+ * 不直接 import NetCraft 的 Java 类，
+ * 避免 NetCraft 不存在时导致本 Mod 无法启动。
+ */
 public final class NetCraftReflection {
 
-    private static final Logger LOGGER =
-            LogUtils.getLogger();
+    private static final Logger LOGGER = LogUtils.getLogger();
+
+    private static final Map<String, Class<?>> CLASS_CACHE =
+            new ConcurrentHashMap<>();
+
+    private static final Map<String, Method> METHOD_CACHE =
+            new ConcurrentHashMap<>();
+
+    private static final Map<String, Field> FIELD_CACHE =
+            new ConcurrentHashMap<>();
+
+    private static final Map<String, Boolean> FAILED =
+            new ConcurrentHashMap<>();
 
     private NetCraftReflection() {
     }
 
-    /*
-     * ============================================================
-     * 反射缓存
-     * ============================================================
-     *
-     * 所有 Class / Method / Field 都缓存。
-     *
-     * 这样战斗过程中不会每次伤害都 Class.forName。
+    /**
+     * NetCraft PlayerStatsCapability。
      */
+    private static final String PLAYER_STATS_CAPABILITY =
+            "com.jiufeng.netcraft.capability.PlayerStatsCapability";
 
-    private static final Map<String, Optional<Class<?>>> CLASS_CACHE =
-            new ConcurrentHashMap<>();
-
-    private static final Map<String, Optional<Method>> METHOD_CACHE =
-            new ConcurrentHashMap<>();
-
-    private static final Map<String, Optional<Field>> FIELD_CACHE =
-            new ConcurrentHashMap<>();
-
-    /*
-     * 某个功能失败后不再疯狂重试。
+    /**
+     * 查找类。
      */
-    private static final Set<String> FAILED =
-            ConcurrentHashMap.newKeySet();
-
-    /*
-     * ============================================================
-     * 基础 Class 查找
-     * ============================================================
-     */
-
     public static Class<?> findClass(
             String className
     ) {
 
         if (className == null
-                || className.isEmpty()) {
+                || className.isBlank()) {
 
             return null;
         }
 
-        Optional<Class<?>> cached =
+        Class<?> cached =
                 CLASS_CACHE.get(className);
 
         if (cached != null) {
-            return cached.orElse(null);
+            return cached;
+        }
+
+        if (FAILED.containsKey(
+                "class:" + className
+        )) {
+            return null;
         }
 
         try {
@@ -76,385 +78,177 @@ public final class NetCraftReflection {
 
             CLASS_CACHE.put(
                     className,
-                    Optional.of(clazz)
+                    clazz
             );
 
             return clazz;
 
-        } catch (Throwable ignored) {
+        } catch (Throwable e) {
 
-            CLASS_CACHE.put(
-                    className,
-                    Optional.empty()
+            FAILED.put(
+                    "class:" + className,
+                    true
             );
 
             return null;
         }
     }
 
-    /*
-     * ============================================================
-     * NetCraft PlayerStatsCapability
-     * ============================================================
-     *
-     * 目标：
-     *
-     * com.jiufeng.netcraft.capability.PlayerStatsCapability
-     *
-     * 这里不 import。
+    /**
+     * 在类及其父类中寻找方法。
      */
-
-    public static Object resolvePlayerStatsCapability(
-            LivingEntity living
+    public static Method findMethod(
+            Class<?> clazz,
+            String name,
+            int parameterCount
     ) {
 
-        if (living == null) {
-            return null;
-        }
-
-        Class<?> capabilityClass =
-                findClass(
-                        "com.jiufeng.netcraft.capability.PlayerStatsCapability"
-                );
-
-        if (capabilityClass == null) {
-
-            disableOnce(
-                    "PlayerStatsCapability",
-                    "找不到 PlayerStatsCapability"
-            );
+        if (clazz == null
+                || name == null) {
 
             return null;
         }
 
-        /*
-         * 这里不直接假设 Capability 的静态字段
-         * 一定叫什么名字。
-         *
-         * 我们尝试寻找：
-         *
-         * 静态 Capability 字段
-         * 类型符合
-         */
+        String key =
+                "method:"
+                        + clazz.getName()
+                        + ":"
+                        + name
+                        + ":"
+                        + parameterCount;
 
-        Object capability =
-                findStaticCapabilityField(
-                        capabilityClass
-                );
+        Method cached =
+                METHOD_CACHE.get(key);
 
-        if (capability == null) {
+        if (cached != null) {
+            return cached;
+        }
 
-            disableOnce(
-                    "PlayerStatsCapability",
-                    "找不到 PlayerStatsCapability 的 Capability 字段"
-            );
-
+        if (FAILED.containsKey(key)) {
             return null;
         }
 
-        /*
-         * Forge Capability 获取：
-         *
-         * living.getCapability(capability, null)
-         *
-         * 为了不直接引用 Capability<T>，
-         * 这里继续反射。
-         */
+        Class<?> current = clazz;
 
-        try {
+        while (current != null) {
 
-            Method getCapability =
-                    findMethod(
-                            living.getClass(),
-                            "getCapability",
-                            2
+            try {
+
+                for (Method method :
+                        current.getDeclaredMethods()) {
+
+                    if (!method.getName()
+                            .equals(name)) {
+
+                        continue;
+                    }
+
+                    if (method.getParameterCount()
+                            != parameterCount) {
+
+                        continue;
+                    }
+
+                    try {
+                        method.setAccessible(true);
+                    } catch (Throwable ignored) {
+                    }
+
+                    METHOD_CACHE.put(
+                            key,
+                            method
                     );
 
-            if (getCapability == null) {
-
-                disableOnce(
-                        "getCapability",
-                        "找不到 LivingEntity#getCapability"
-                );
-
-                return null;
-            }
-
-            Object lazyOptional =
-                    getCapability.invoke(
-                            living,
-                            capability,
-                            null
-                    );
-
-            if (lazyOptional == null) {
-                return null;
-            }
-
-            /*
-             * LazyOptional#orElse(T)
-             */
-            Method orElse =
-                    findMethod(
-                            lazyOptional.getClass(),
-                            "orElse",
-                            1
-                    );
-
-            if (orElse != null) {
-
-                return orElse.invoke(
-                        lazyOptional,
-                        new Object[]{null}
-                );
-            }
-
-            /*
-             * 如果实现类找不到，
-             * 尝试父类。
-             */
-            Method[] methods =
-                    lazyOptional
-                            .getClass()
-                            .getMethods();
-
-            for (Method method : methods) {
-
-                if (!method.getName()
-                        .equals("orElse")) {
-
-                    continue;
+                    return method;
                 }
 
-                if (method.getParameterCount()
-                        != 1) {
+            } catch (Throwable ignored) {
+            }
 
-                    continue;
+            current =
+                    current.getSuperclass();
+        }
+
+        FAILED.put(
+                key,
+                true
+        );
+
+        return null;
+    }
+
+    /**
+     * 在类及其父类中寻找字段。
+     */
+    public static Field findField(
+            Class<?> clazz,
+            String name
+    ) {
+
+        if (clazz == null
+                || name == null) {
+
+            return null;
+        }
+
+        String key =
+                "field:"
+                        + clazz.getName()
+                        + ":"
+                        + name;
+
+        Field cached =
+                FIELD_CACHE.get(key);
+
+        if (cached != null) {
+            return cached;
+        }
+
+        if (FAILED.containsKey(key)) {
+            return null;
+        }
+
+        Class<?> current = clazz;
+
+        while (current != null) {
+
+            try {
+
+                Field field =
+                        current.getDeclaredField(
+                                name
+                        );
+
+                try {
+                    field.setAccessible(true);
+                } catch (Throwable ignored) {
                 }
 
-                method.setAccessible(true);
-
-                return method.invoke(
-                        lazyOptional,
-                        new Object[]{null}
+                FIELD_CACHE.put(
+                        key,
+                        field
                 );
+
+                return field;
+
+            } catch (Throwable ignored) {
             }
 
-        } catch (Throwable t) {
-
-            disableOnce(
-                    "getPlayerStatsCapability",
-                    "读取 PlayerStatsCapability 失败: "
-                            + t.getClass().getSimpleName()
-            );
+            current =
+                    current.getSuperclass();
         }
+
+        FAILED.put(
+                key,
+                true
+        );
 
         return null;
     }
 
-    /*
-     * ============================================================
-     * 读取物理防御
-     * ============================================================
+    /**
+     * 无参数方法调用。
      */
-
-    public static Double getPhysicalDefense(
-            LivingEntity living
-    ) {
-
-        Object capability =
-                resolvePlayerStatsCapability(
-                        living
-                );
-
-        if (capability == null) {
-            return null;
-        }
-
-        Method getter =
-                findCompatibleMethod(
-                        capability.getClass(),
-                        "getPhysicalDefense",
-                        0
-                );
-
-        if (getter == null) {
-
-            disableOnce(
-                    "getPhysicalDefense",
-                    "找不到 getPhysicalDefense()"
-            );
-
-            return null;
-        }
-
-        try {
-
-            getter.setAccessible(true);
-
-            Object value =
-                    getter.invoke(
-                            capability
-                    );
-
-            if (value instanceof Number number) {
-
-                return number.doubleValue();
-            }
-
-        } catch (Throwable t) {
-
-            disableOnce(
-                    "getPhysicalDefense",
-                    "读取物理防御失败: "
-                            + t.getClass().getSimpleName()
-            );
-        }
-
-        return null;
-    }
-
-    /*
-     * ============================================================
-     * 修改物理防御
-     * ============================================================
-     */
-
-    public static boolean setPhysicalDefense(
-            LivingEntity living,
-            double value
-    ) {
-
-        Object capability =
-                resolvePlayerStatsCapability(
-                        living
-                );
-
-        if (capability == null) {
-            return false;
-        }
-
-        Method setter =
-                findCompatibleMethod(
-                        capability.getClass(),
-                        "setPhysicalDefense",
-                        1
-                );
-
-        if (setter == null) {
-
-            disableOnce(
-                    "setPhysicalDefense",
-                    "找不到 setPhysicalDefense(...)"
-            );
-
-            return false;
-        }
-
-        try {
-
-            setter.setAccessible(true);
-
-            Class<?> type =
-                    setter.getParameterTypes()[0];
-
-            setter.invoke(
-                    capability,
-                    convertNumber(
-                            value,
-                            type
-                    )
-            );
-
-            return true;
-
-        } catch (Throwable t) {
-
-            disableOnce(
-                    "setPhysicalDefense",
-                    "写入物理防御失败: "
-                            + t.getClass().getSimpleName()
-            );
-
-            return false;
-        }
-    }
-
-    /*
-     * ============================================================
-     * 附魔防御公式
-     * ============================================================
-     *
-     * 目标：
-     *
-     * com.jiufeng.netcraft.api.PlayerBaseStats
-     *
-     * getEnchantmentDefenseValue(int)
-     *
-     * 这里不直接依赖 PlayerBaseStats。
-     */
-
-    public static Double getEnchantmentDefenseValue(
-            Object playerBaseStats,
-            int enchantmentLevel
-    ) {
-
-        if (playerBaseStats == null) {
-            return null;
-        }
-
-        Method method =
-                findCompatibleMethod(
-                        playerBaseStats.getClass(),
-                        "getEnchantmentDefenseValue",
-                        1
-                );
-
-        if (method == null) {
-
-            disableOnce(
-                    "getEnchantmentDefenseValue",
-                    "找不到 getEnchantmentDefenseValue(int)"
-            );
-
-            return null;
-        }
-
-        try {
-
-            method.setAccessible(true);
-
-            Object value =
-                    method.invoke(
-                            playerBaseStats,
-                            enchantmentLevel
-                    );
-
-            if (value instanceof Number number) {
-
-                return number.doubleValue();
-            }
-
-        } catch (Throwable t) {
-
-            disableOnce(
-                    "getEnchantmentDefenseValue",
-                    "调用附魔防御公式失败: "
-                            + t.getClass().getSimpleName()
-            );
-        }
-
-        return null;
-    }
-
-    /*
-     * ============================================================
-     * 通用无参方法
-     * ============================================================
-     *
-     * 后面 BossBase / HatredManager 等可以直接用。
-     */
-
     public static Object invokeNoArgs(
             Object target,
             String methodName
@@ -467,7 +261,7 @@ public final class NetCraftReflection {
         }
 
         Method method =
-                findCompatibleMethod(
+                findMethod(
                         target.getClass(),
                         methodName,
                         0
@@ -479,88 +273,555 @@ public final class NetCraftReflection {
 
         try {
 
-            method.setAccessible(true);
-
             return method.invoke(
                     target
             );
 
-        } catch (Throwable t) {
+        } catch (Throwable e) {
 
-            disableOnce(
-                    "method:" + target.getClass().getName()
-                            + "#" + methodName,
-                    "调用失败: "
-                            + t.getClass().getSimpleName()
+            warnOnce(
+                    "invoke:"
+                            + target.getClass().getName()
+                            + ":"
+                            + methodName,
+                    "调用 NetCraft 方法失败: "
+                            + methodName
             );
 
             return null;
         }
     }
 
-    /*
-     * ============================================================
-     * Boss HatredManager
-     * ============================================================
-     *
-     * 目标：
-     *
-     * BossBase#getHatredManager()
-     *
-     * 返回对象后，
-     * 后面的战斗统计模块再读取 Map。
+    /**
+     * 指定参数调用。
      */
+    public static Object invoke(
+            Object target,
+            String methodName,
+            Object... args
+    ) {
 
+        if (target == null
+                || methodName == null) {
+
+            return null;
+        }
+
+        int count =
+                args == null
+                        ? 0
+                        : args.length;
+
+        Method method =
+                findMethod(
+                        target.getClass(),
+                        methodName,
+                        count
+                );
+
+        if (method == null) {
+            return null;
+        }
+
+        try {
+
+            return method.invoke(
+                    target,
+                    args
+            );
+
+        } catch (Throwable e) {
+
+            warnOnce(
+                    "invoke:"
+                            + target.getClass().getName()
+                            + ":"
+                            + methodName
+                            + ":"
+                            + count,
+                    "调用 NetCraft 方法失败: "
+                            + methodName
+            );
+
+            return null;
+        }
+    }
+
+    /**
+     * 获取字段。
+     */
+    public static Object getField(
+            Object target,
+            String fieldName
+    ) {
+
+        if (target == null
+                || fieldName == null) {
+
+            return null;
+        }
+
+        Field field =
+                findField(
+                        target.getClass(),
+                        fieldName
+                );
+
+        if (field == null) {
+            return null;
+        }
+
+        try {
+
+            return field.get(target);
+
+        } catch (Throwable e) {
+
+            warnOnce(
+                    "field:"
+                            + target.getClass().getName()
+                            + ":"
+                            + fieldName,
+                    "读取 NetCraft 字段失败: "
+                            + fieldName
+            );
+
+            return null;
+        }
+    }
+
+    /**
+     * 设置字段。
+     */
+    public static boolean setField(
+            Object target,
+            String fieldName,
+            Object value
+    ) {
+
+        if (target == null
+                || fieldName == null) {
+
+            return false;
+        }
+
+        Field field =
+                findField(
+                        target.getClass(),
+                        fieldName
+                );
+
+        if (field == null) {
+            return false;
+        }
+
+        try {
+
+            field.set(
+                    target,
+                    value
+            );
+
+            return true;
+
+        } catch (Throwable e) {
+
+            warnOnce(
+                    "setfield:"
+                            + target.getClass().getName()
+                            + ":"
+                            + fieldName,
+                    "设置 NetCraft 字段失败: "
+                            + fieldName
+            );
+
+            return false;
+        }
+    }
+
+    /**
+     * 尝试寻找 PlayerStatsCapability。
+     *
+     * 这里不直接依赖 NetCraft，
+     * 因此 NetCraft 没安装时也不会崩。
+     */
+    public static Class<?> findPlayerStatsCapability() {
+
+        return findClass(
+                PLAYER_STATS_CAPABILITY
+        );
+    }
+
+    /**
+     * 尝试通过实体的 getCapability 获取能力对象。
+     *
+     * Forge 的 LivingEntity 实际继承自 ICapabilityProvider，
+     * getCapability 通常有两个参数：
+     *
+     * Capability
+     * Direction
+     *
+     * 第二个参数允许传 null。
+     */
+    public static Object getCapability(
+            Object entity,
+            Object capability
+    ) {
+
+        if (entity == null
+                || capability == null) {
+
+            return null;
+        }
+
+        Method method =
+                findMethod(
+                        entity.getClass(),
+                        "getCapability",
+                        2
+                );
+
+        if (method == null) {
+            return null;
+        }
+
+        try {
+
+            Object result =
+                    method.invoke(
+                            entity,
+                            capability,
+                            null
+                    );
+
+            /*
+             * Forge Capability 通常返回 LazyOptional。
+             *
+             * 不直接 import Forge Capability API，
+             * 用反射兼容。
+             */
+            if (result == null) {
+                return null;
+            }
+
+            Object present =
+                    invokeNoArgs(
+                            result,
+                            "isPresent"
+                    );
+
+            if (present instanceof Boolean
+                    && (Boolean) present) {
+
+                return invokeNoArgs(
+                        result,
+                        "orElseThrow"
+                );
+            }
+
+            return null;
+
+        } catch (Throwable e) {
+
+            warnOnce(
+                    "getcapability:"
+                            + entity.getClass().getName(),
+                    "读取 NetCraft Capability 失败"
+            );
+
+            return null;
+        }
+    }
+
+    /**
+     * 尝试从实体寻找 PlayerStats。
+     *
+     * 这是兼容入口。
+     *
+     * 如果未来根据你的 NetCraft 实际源码确认
+     * Capability 获取方式不同，只需要修改这里。
+     */
+    public static Object findPlayerStats(
+            Object entity
+    ) {
+
+        if (entity == null) {
+            return null;
+        }
+
+        Class<?> capabilityClass =
+                findPlayerStatsCapability();
+
+        if (capabilityClass == null) {
+            return null;
+        }
+
+        /*
+         * 先寻找可能的静态 Capability 字段。
+         */
+        Object capability =
+                findStaticCapabilityField(
+                        capabilityClass
+                );
+
+        if (capability == null) {
+            return null;
+        }
+
+        return getCapability(
+                entity,
+                capability
+        );
+    }
+
+    /**
+     * 寻找 Capability 类相关的静态字段。
+     */
+    private static Object findStaticCapabilityField(
+            Class<?> capabilityClass
+    ) {
+
+        Class<?> current =
+                capabilityClass;
+
+        while (current != null) {
+
+            try {
+
+                for (Field field :
+                        current.getDeclaredFields()) {
+
+                    int modifiers =
+                            field.getModifiers();
+
+                    if (!Modifier.isStatic(
+                            modifiers
+                    )) {
+                        continue;
+                    }
+
+                    /*
+                     * Capability 字段通常是 Capability<T>。
+                     */
+                    if (!field.getType()
+                            .getName()
+                            .contains("Capability")) {
+
+                        continue;
+                    }
+
+                    try {
+                        field.setAccessible(true);
+                    } catch (Throwable ignored) {
+                    }
+
+                    Object value =
+                            field.get(null);
+
+                    if (value != null) {
+                        return value;
+                    }
+                }
+
+            } catch (Throwable ignored) {
+            }
+
+            current =
+                    current.getSuperclass();
+        }
+
+        return null;
+    }
+
+    /**
+     * 获取物理防御。
+     */
+    public static Double getPhysicalDefense(
+            Object stats
+    ) {
+
+        if (stats == null) {
+            return null;
+        }
+
+        Object value =
+                invokeNoArgs(
+                        stats,
+                        "getPhysicalDefense"
+                );
+
+        return toDouble(value);
+    }
+
+    /**
+     * 设置物理防御。
+     */
+    public static boolean setPhysicalDefense(
+            Object stats,
+            double value
+    ) {
+
+        if (stats == null) {
+            return false;
+        }
+
+        Method method =
+                findMethod(
+                        stats.getClass(),
+                        "setPhysicalDefense",
+                        1
+                );
+
+        if (method == null) {
+            return false;
+        }
+
+        try {
+
+            Class<?> type =
+                    method.getParameterTypes()[0];
+
+            Object converted =
+                    convertNumber(
+                            value,
+                            type
+                    );
+
+            method.invoke(
+                    stats,
+                    converted
+            );
+
+            return true;
+
+        } catch (Throwable e) {
+
+            warnOnce(
+                    "setphysicaldefense:"
+                            + stats.getClass().getName(),
+                    "设置 NetCraft 物理防御失败"
+            );
+
+            return false;
+        }
+    }
+
+    /**
+     * 获取附魔防御值。
+     */
+    public static Double getEnchantmentDefenseValue(
+            Object stats,
+            int level
+    ) {
+
+        if (stats == null) {
+            return null;
+        }
+
+        Method method =
+                findMethod(
+                        stats.getClass(),
+                        "getEnchantmentDefenseValue",
+                        1
+                );
+
+        if (method == null) {
+            return null;
+        }
+
+        try {
+
+            Object value =
+                    method.invoke(
+                            stats,
+                            level
+                    );
+
+            return toDouble(value);
+
+        } catch (Throwable e) {
+
+            warnOnce(
+                    "enchantmentdefense:"
+                            + stats.getClass().getName(),
+                    "读取 NetCraft 附魔防御值失败"
+            );
+
+            return null;
+        }
+    }
+
+    /**
+     * 尝试获取 Boss HatredManager。
+     */
     public static Object getHatredManager(
-            LivingEntity boss
+            Object boss
     ) {
 
         if (boss == null) {
             return null;
         }
 
-        /*
-         * 不要求 BossBase 的准确类名。
-         *
-         * 直接从实体类及父类向上寻找：
-         *
-         * getHatredManager()
-         */
+        return invokeNoArgs(
+                boss,
+                "getHatredManager"
+        );
+    }
+
+    /**
+     * 获取 HatredManager 中可能的 Map 数据。
+     *
+     * 因为不同 NetCraft 版本的具体方法可能不同，
+     * 这里不会假设固定方法名。
+     */
+    public static Map<?, ?> findFirstMap(
+            Object object
+    ) {
+
+        if (object == null) {
+            return null;
+        }
 
         Class<?> current =
-                boss.getClass();
+                object.getClass();
 
-        while (current != null
-                && current != Object.class) {
+        while (current != null) {
 
-            Method method =
-                    findCompatibleMethod(
-                            current,
-                            "getHatredManager",
-                            0
-                    );
+            try {
 
-            if (method != null) {
+                for (Method method :
+                        current.getDeclaredMethods()) {
 
-                try {
+                    if (method.getParameterCount()
+                            != 0) {
+                        continue;
+                    }
 
-                    method.setAccessible(true);
+                    if (!Map.class
+                            .isAssignableFrom(
+                                    method.getReturnType()
+                            )) {
 
-                    return method.invoke(
-                            boss
-                    );
+                        continue;
+                    }
 
-                } catch (Throwable t) {
+                    try {
+                        method.setAccessible(true);
+                    } catch (Throwable ignored) {
+                    }
 
-                    disableOnce(
-                            "getHatredManager",
-                            "Boss仇恨管理器读取失败: "
-                                    + t.getClass()
-                                    .getSimpleName()
-                    );
+                    Object result =
+                            method.invoke(
+                                    object
+                            );
 
-                    return null;
+                    if (result instanceof Map<?, ?> map) {
+                        return map;
+                    }
+
                 }
+
+            } catch (Throwable ignored) {
             }
 
             current =
@@ -570,371 +831,69 @@ public final class NetCraftReflection {
         return null;
     }
 
-    /*
-     * ============================================================
-     * 读取 Boss 战斗统计
-     * ============================================================
-     *
-     * 根据你截图中的方案：
-     *
-     * getHatredManager()
-     *       ↓
-     * 找所有无参返回 Map 的方法
-     *       ↓
-     * 只接受 Map<String/UUID, Double>
-     *
-     * 不把方法名写死。
+    /**
+     * 数字转换。
      */
-
-    public static Map<Object, Double>
-    readCombatantIds(
-            LivingEntity boss
+    public static Double toDouble(
+            Object value
     ) {
 
-        Object hatredManager =
-                getHatredManager(
-                        boss
-                );
-
-        if (hatredManager == null) {
-            return Collections.emptyMap();
+        if (!(value instanceof Number number)) {
+            return null;
         }
 
-        Map<Object, Double> result =
-                new LinkedHashMap<>();
+        double result =
+                number.doubleValue();
 
-        Class<?> current =
-                hatredManager.getClass();
+        if (Double.isNaN(result)
+                || Double.isInfinite(result)) {
 
-        while (current != null
-                && current != Object.class) {
-
-            for (Method method :
-                    current.getDeclaredMethods()) {
-
-                if (method.getParameterCount()
-                        != 0) {
-
-                    continue;
-                }
-
-                /*
-                 * 必须返回 Map。
-                 */
-                if (!Map.class.isAssignableFrom(
-                        method.getReturnType()
-                )) {
-
-                    continue;
-                }
-
-                try {
-
-                    method.setAccessible(true);
-
-                    Object value =
-                            method.invoke(
-                                    hatredManager
-                            );
-
-                    if (!(value instanceof Map<?, ?> map)) {
-                        continue;
-                    }
-
-                    /*
-                     * 只接受 value 是 Number。
-                     *
-                     * NetCraft 当前设计里是 Double。
-                     */
-                    for (Map.Entry<?, ?> entry :
-                            map.entrySet()) {
-
-                        if (!(entry.getValue()
-                                instanceof Number number)) {
-
-                            continue;
-                        }
-
-                        result.put(
-                                entry.getKey(),
-                                number.doubleValue()
-                        );
-                    }
-
-                    /*
-                     * 找到符合条件的 Map 后结束。
-                     */
-                    if (!result.isEmpty()) {
-                        return result;
-                    }
-
-                } catch (Throwable ignored) {
-                    /*
-                     * 某个 Map 方法访问失败，
-                     * 继续尝试下一个。
-                     */
-                }
-            }
-
-            current =
-                    current.getSuperclass();
+            return null;
         }
 
         return result;
     }
 
-    /*
-     * ============================================================
-     * 静态 Capability 字段寻找
-     * ============================================================
+    /**
+     * 数字类型转换。
      */
-
-    private static Object findStaticCapabilityField(
-            Class<?> capabilityClass
-    ) {
-
-        /*
-         * 先检查 capabilityClass 自己。
-         */
-        Class<?> current =
-                capabilityClass;
-
-        while (current != null
-                && current != Object.class) {
-
-            for (Field field :
-                    current.getDeclaredFields()) {
-
-                int modifiers =
-                        field.getModifiers();
-
-                if (!Modifier.isStatic(
-                        modifiers
-                )) {
-                    continue;
-                }
-
-                try {
-
-                    field.setAccessible(true);
-
-                    Object value =
-                            field.get(null);
-
-                    if (value == null) {
-                        continue;
-                    }
-
-                    /*
-                     * Capability 的字段通常包含：
-                     *
-                     * net.minecraftforge.common.capabilities.Capability
-                     *
-                     * 不直接 import。
-                     */
-                    String typeName =
-                            field.getType()
-                                    .getName();
-
-                    if (typeName.contains(
-                            "Capability"
-                    )) {
-
-                        return value;
-                    }
-
-                } catch (Throwable ignored) {
-                }
-            }
-
-            current =
-                    current.getSuperclass();
-        }
-
-        return null;
-    }
-
-    /*
-     * ============================================================
-     * Method 查找
-     * ============================================================
-     */
-
-    private static Method findMethod(
-            Class<?> clazz,
-            String name,
-            int parameterCount
-    ) {
-
-        if (clazz == null) {
-            return null;
-        }
-
-        String key =
-                clazz.getName()
-                        + "#"
-                        + name
-                        + "#"
-                        + parameterCount;
-
-        Optional<Method> cached =
-                METHOD_CACHE.get(key);
-
-        if (cached != null) {
-            return cached.orElse(null);
-        }
-
-        Class<?> current =
-                clazz;
-
-        while (current != null
-                && current != Object.class) {
-
-            for (Method method :
-                    current.getDeclaredMethods()) {
-
-                if (!method.getName()
-                        .equals(name)) {
-
-                    continue;
-                }
-
-                if (method.getParameterCount()
-                        != parameterCount) {
-
-                    continue;
-                }
-
-                try {
-                    method.setAccessible(true);
-                } catch (Throwable ignored) {
-                }
-
-                METHOD_CACHE.put(
-                        key,
-                        Optional.of(method)
-                );
-
-                return method;
-            }
-
-            current =
-                    current.getSuperclass();
-        }
-
-        METHOD_CACHE.put(
-                key,
-                Optional.empty()
-        );
-
-        return null;
-    }
-
-    /*
-     * ============================================================
-     * 更宽松的方法寻找
-     * ============================================================
-     */
-
-    private static Method findCompatibleMethod(
-            Class<?> clazz,
-            String name,
-            int parameterCount
-    ) {
-
-        if (clazz == null) {
-            return null;
-        }
-
-        Method method =
-                findMethod(
-                        clazz,
-                        name,
-                        parameterCount
-                );
-
-        if (method != null) {
-            return method;
-        }
-
-        /*
-         * 再看 public inherited methods。
-         */
-        try {
-
-            for (Method candidate :
-                    clazz.getMethods()) {
-
-                if (!candidate.getName()
-                        .equals(name)) {
-
-                    continue;
-                }
-
-                if (candidate
-                        .getParameterCount()
-                        != parameterCount) {
-
-                    continue;
-                }
-
-                try {
-                    candidate.setAccessible(true);
-                } catch (Throwable ignored) {
-                }
-
-                return candidate;
-            }
-
-        } catch (Throwable ignored) {
-        }
-
-        return null;
-    }
-
-    /*
-     * ============================================================
-     * 数值类型转换
-     * ============================================================
-     */
-
     private static Object convertNumber(
             double value,
-            Class<?> targetType
+            Class<?> type
     ) {
 
-        if (targetType == double.class
-                || targetType == Double.class) {
+        if (type == double.class
+                || type == Double.class) {
 
             return value;
         }
 
-        if (targetType == float.class
-                || targetType == Float.class) {
+        if (type == float.class
+                || type == Float.class) {
 
             return (float) value;
         }
 
-        if (targetType == long.class
-                || targetType == Long.class) {
+        if (type == long.class
+                || type == Long.class) {
 
             return (long) value;
         }
 
-        if (targetType == int.class
-                || targetType == Integer.class) {
+        if (type == int.class
+                || type == Integer.class) {
 
             return (int) value;
         }
 
-        if (targetType == short.class
-                || targetType == Short.class) {
+        if (type == short.class
+                || type == Short.class) {
 
             return (short) value;
         }
 
-        if (targetType == byte.class
-                || targetType == Byte.class) {
+        if (type == byte.class
+                || type == Byte.class) {
 
             return (byte) value;
         }
@@ -942,40 +901,32 @@ public final class NetCraftReflection {
         return value;
     }
 
-    /*
-     * ============================================================
-     * 降级日志
-     * ============================================================
+    /**
+     * 一次性警告。
      *
-     * 同一个功能只报一次。
-     *
-     * 避免服务器控制台每 tick 刷几千行错误。
+     * 避免 NetCraft 某个版本没有某方法时，
+     * 每 tick 刷屏。
      */
-
-    private static void disableOnce(
+    private static void warnOnce(
             String key,
             String message
     ) {
 
-        if (!FAILED.add(key)) {
-            return;
-        }
+        if (FAILED.putIfAbsent(
+                "warn:" + key,
+                true
+        ) == null) {
 
-        LOGGER.warn(
-                "[NetCraftToolkit] {}，该功能已自动降级。",
-                message
-        );
+            LOGGER.warn(
+                    "[NetCraftToolkit] {}",
+                    message
+            );
+        }
     }
 
-    /*
-     * ============================================================
-     * 清理缓存
-     * ============================================================
-     *
-     * 服务器重启时一般不需要，
-     * 但方便以后热重载。
+    /**
+     * 清空缓存。
      */
-
     public static void clearCaches() {
 
         CLASS_CACHE.clear();
