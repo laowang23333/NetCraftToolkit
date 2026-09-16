@@ -175,8 +175,38 @@ public class NetCraftDropManager {
         }
 
         /*
+         * 先验证配置里至少有一个可以实际生成的物品。
+         *
+         * 这样 replace = true 时，如果物品 ID 写错，
+         * 不会先把原版掉落清空，最后变成“什么都不掉”。
+         */
+        boolean hasValidItem = false;
+
+        for (DropEntry entry : config.entries()) {
+            if (entry == null
+                    || entry.itemId() == null
+                    || entry.itemId().isBlank()
+                    || entry.chance() <= 0.0D) {
+                continue;
+            }
+
+            if (findItem(entry.itemId()) != null) {
+                hasValidItem = true;
+                break;
+            }
+        }
+
+        if (!hasValidItem) {
+            NetCraftToolkit.LOGGER.warn(
+                    "[NetCraftToolkit] No valid custom drop item for {}. Original drops were kept.",
+                    entityId
+            );
+            return;
+        }
+
+        /*
          * 如果配置为替换原有掉落，
-         * 先清掉事件当前的掉落。
+         * 只有确认至少有一个有效自定义物品后才清空原始掉落。
          */
         if (config.replaceDrops()) {
             event.getDrops().clear();
