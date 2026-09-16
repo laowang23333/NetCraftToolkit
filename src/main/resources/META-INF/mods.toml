@@ -1,0 +1,26 @@
+modLoader="javafml"
+loaderVersion="[47,)"
+license="All Rights Reserved"
+
+[[mods]]
+modId="netcrafttoolkit"
+version="1.0.0"
+displayName="NetCraft Toolkit"
+authors="NetCraftToolkit"
+description='''
+NetCraft Toolkit - NetCraft 生物属性、掉落与称号工具。
+'''
+
+[[dependencies.netcrafttoolkit]]
+modId="forge"
+mandatory=true
+versionRange="[47.4.13,)"
+ordering="NONE"
+side="BOTH"
+
+[[dependencies.netcrafttoolkit]]
+modId="minecraft"
+mandatory=true
+versionRange="[1.20.1,1.21)"
+ordering="NONE"
+side="BOTH"
