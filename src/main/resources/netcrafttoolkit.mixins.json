@@ -1,0 +1,13 @@
+{
+  "required": true,
+  "minVersion": "0.8",
+  "package": "com.example.netcrafttoolkit.mixin",
+  "compatibilityLevel": "JAVA_17",
+  "refmap": "netcrafttoolkit.refmap.json",
+  "mixins": [
+    "BossBaseMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}
