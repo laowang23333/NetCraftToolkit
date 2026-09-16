@@ -136,8 +136,17 @@ public class TitleMenu extends ChestMenu {
             return;
         }
 
-        if (manager == null) {
+        // 客户端只负责发送点击包，所有称号状态修改必须由服务端执行。
+        // 这样可以避免客户端本地状态和服务端状态互相覆盖，导致称号“锁死”。
+        if (!(clickedPlayer instanceof ServerPlayer)) {
+            if (slotId >= 0 && slotId < SIZE) {
+                return;
+            }
             super.clicked(slotId, dragType, clickType, clickedPlayer);
+            return;
+        }
+
+        if (manager == null) {
             return;
         }
 
@@ -146,18 +155,22 @@ public class TitleMenu extends ChestMenu {
             if (index >= 0 && index < slotTitleIds.size()) {
                 String id = slotTitleIds.get(index);
 
-                if (clickType == ClickType.PICKUP) {
-                    manager.setMainTitle(player.getUUID(), id);
-                    player.sendSystemMessage(
-                            Component.literal("已设置主称号：")
-                                    .append(TitleManager.parseText(manager.getTitleText(id)))
-                    );
-                } else if (clickType == ClickType.PICKUP_ALL) {
-                    manager.setSubTitle(player.getUUID(), id);
-                    player.sendSystemMessage(
-                            Component.literal("已设置副称号：")
-                                    .append(TitleManager.parseText(manager.getTitleText(id)))
-                    );
+                boolean rightClick = dragType == 1;
+
+                if (rightClick) {
+                    if (manager.setSubTitle(player.getUUID(), id)) {
+                        player.sendSystemMessage(
+                                Component.literal("已设置副称号：")
+                                        .append(TitleManager.parseText(manager.getTitleText(id)))
+                        );
+                    }
+                } else {
+                    if (manager.setMainTitle(player.getUUID(), id)) {
+                        player.sendSystemMessage(
+                                Component.literal("已设置主称号：")
+                                        .append(TitleManager.parseText(manager.getTitleText(id)))
+                        );
+                    }
                 }
 
                 rebuild();
