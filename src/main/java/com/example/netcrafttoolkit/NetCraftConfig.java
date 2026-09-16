@@ -1,26 +1,13 @@
 package com.example.netcrafttoolkit;
 
 import com.mojang.logging.LogUtils;
-import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.MinecraftServer;
-import net.minecraft.util.RandomSource;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.ai.attributes.Attribute;
-import net.minecraft.world.entity.ai.attributes.AttributeInstance;
 import net.minecraft.world.entity.ai.attributes.Attributes;
-import net.minecraft.world.item.Item;
-import net.minecraft.world.item.ItemStack;
-import net.minecraft.world.entity.item.ItemEntity;
-import net.minecraft.world.level.Level;
-import net.minecraftforge.event.entity.EntityJoinLevelEvent;
-import net.minecraftforge.event.entity.living.LivingDropsEvent;
-import net.minecraftforge.event.server.ServerStoppingEvent;
-import net.minecraftforge.eventbus.api.EventPriority;
-import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.registries.ForgeRegistries;
-import net.minecraftforge.server.ServerLifecycleHooks;
 import org.slf4j.Logger;
 
 import java.io.IOException;
@@ -40,12 +27,11 @@ public class NetCraftConfig {
     private static final String CONFIG_FILE = "netcraft-attributes.toml";
 
     /*
-     * NetCraft 生物允许修改的原版属性。
-     *
-     * 注意：
-     * 这里全部使用 Minecraft 原版 Attribute。
-     * 不直接引用 NetCraft 的任何 Java 类。
+     * ============================================================
+     * 支持的 Minecraft 原版属性
+     * ============================================================
      */
+
     private static final LinkedHashMap<String, Attribute> ATTRIBUTES =
             new LinkedHashMap<>();
 
@@ -55,106 +41,86 @@ public class NetCraftConfig {
         ATTRIBUTES.put("movement_speed", Attributes.MOVEMENT_SPEED);
         ATTRIBUTES.put("armor", Attributes.ARMOR);
         ATTRIBUTES.put("attack_speed", Attributes.ATTACK_SPEED);
-        ATTRIBUTES.put("knockback_resistance", Attributes.KNOCKBACK_RESISTANCE);
-        ATTRIBUTES.put("follow_range", Attributes.FOLLOW_RANGE);
+        ATTRIBUTES.put(
+                "knockback_resistance",
+                Attributes.KNOCKBACK_RESISTANCE
+        );
+        ATTRIBUTES.put(
+                "follow_range",
+                Attributes.FOLLOW_RANGE
+        );
     }
 
     /*
-     * 玩家/生物实际使用的配置值。
+     * ============================================================
+     * 生物属性配置
      *
-     * key:
-     *   netcraft:entity_xxx
-     *
-     * value:
-     *   属性名 -> 数值
+     * entityId
+     *     ->
+     * 属性名
+     *     ->
+     * 数值
+     * ============================================================
      */
+
     private final Map<String, Map<String, Double>> entityValues =
             new LinkedHashMap<>();
 
     /*
-     * 生物第一次被发现时记录的原版 Attribute。
+     * ============================================================
+     * 掉落配置
      *
-     * 作用：
-     * 配置热加载时先恢复原始值，
-     * 再重新应用配置。
+     * 掉落已经交给 NetCraftDropManager。
      *
-     * 防止：
-     *
-     * 100
-     *   -> 配置 200
-     *   -> 热加载再 +200
-     *   -> 变成 300
-     *
-     * 我们这里采用：
-     *
-     * 原始 100
-     *   -> 配置 200
-     *   -> 热加载恢复 100
-     *   -> 再设置 200
+     * Config 这里只负责保存和读取数据。
+     * ============================================================
      */
-    private final Map<String, Map<String, Double>> BASE_VALUES =
-            new HashMap<>();
 
-    /*
-     * 自定义掉落。
-     */
-    private final Map<String, List<DropEntry>> drops =
+    private final Map<String, List<NetCraftDropManager.DropEntry>> drops =
             new LinkedHashMap<>();
 
-    /*
-     * 是否完全替换原版掉落。
-     */
     private final Map<String, Boolean> dropReplace =
             new HashMap<>();
+
+    /*
+     * ============================================================
+     * 文件
+     * ============================================================
+     */
 
     private Path configPath;
 
     private MinecraftServer server;
 
-    private final ExecutorService watcher = Executors.newSingleThreadExecutor(r -> {
-        Thread thread = new Thread(r, "NetCraftToolkit-ConfigWatcher");
-        thread.setDaemon(true);
-        return thread;
-    });
-
-    private volatile boolean watching = false;
-
-    public NetCraftConfig() {
-    }
-
     /*
      * ============================================================
-     * 掉落数据
+     * 配置监听线程
      * ============================================================
      */
 
-    public static class DropEntry {
+    private final ExecutorService watcher =
+            Executors.newSingleThreadExecutor(r -> {
 
-        public final String itemId;
-        public final int minCount;
-        public final int maxCount;
-        public final double chance;
+                Thread thread =
+                        new Thread(
+                                r,
+                                "NetCraftToolkit-ConfigWatcher"
+                        );
 
-        public DropEntry(
-                String itemId,
-                int minCount,
-                int maxCount,
-                double chance
-        ) {
-            this.itemId = itemId;
-            this.minCount = minCount;
-            this.maxCount = maxCount;
-            this.chance = chance;
-        }
+                thread.setDaemon(true);
 
-        public int rollCount(RandomSource random) {
-            if (maxCount <= minCount) {
-                return minCount;
-            }
+                return thread;
+            });
 
-            return minCount
-                    + random.nextInt(maxCount - minCount + 1);
-        }
+    private volatile boolean watching = false;
+
+    /*
+     * ============================================================
+     * 构造
+     * ============================================================
+     */
+
+    public NetCraftConfig() {
     }
 
     /*
@@ -164,17 +130,24 @@ public class NetCraftConfig {
      */
 
     public void init(MinecraftServer server) {
+
         this.server = server;
 
-        this.configPath = server.getServerDirectory()
-                .toPath()
-                .resolve("config")
-                .resolve(CONFIG_DIR)
-                .resolve(CONFIG_FILE);
+        this.configPath =
+                server.getServerDirectory()
+                        .toPath()
+                        .resolve("config")
+                        .resolve(CONFIG_DIR)
+                        .resolve(CONFIG_FILE);
 
         try {
-            Files.createDirectories(configPath.getParent());
+
+            Files.createDirectories(
+                    configPath.getParent()
+            );
+
         } catch (IOException e) {
+
             LOGGER.error(
                     "[NetCraftToolkit] 无法创建配置目录: {}",
                     configPath,
@@ -190,32 +163,43 @@ public class NetCraftConfig {
 
     /*
      * ============================================================
-     * 加载
+     * 加载配置
      * ============================================================
      */
 
     public synchronized void load() {
 
         if (configPath == null) {
-            LOGGER.warn("[NetCraftToolkit] configPath 尚未初始化");
+
+            LOGGER.warn(
+                    "[NetCraftToolkit] configPath 尚未初始化"
+            );
+
             return;
         }
 
         try {
 
+            /*
+             * 第一次运行：
+             * 自动扫描 NetCraft 生物并生成配置。
+             */
             if (!Files.exists(configPath)) {
 
                 scanNetCraftTypes();
 
                 save();
 
+                syncDropManager();
+
                 return;
             }
 
-            List<String> lines = Files.readAllLines(
-                    configPath,
-                    StandardCharsets.UTF_8
-            );
+            List<String> lines =
+                    Files.readAllLines(
+                            configPath,
+                            StandardCharsets.UTF_8
+                    );
 
             entityValues.clear();
             drops.clear();
@@ -225,37 +209,55 @@ public class NetCraftConfig {
 
             for (String rawLine : lines) {
 
-                String line = rawLine.trim();
+                if (rawLine == null) {
+                    continue;
+                }
+
+                String line =
+                        rawLine.trim();
 
                 if (line.isEmpty()) {
                     continue;
                 }
 
+                /*
+                 * 注释。
+                 */
                 if (line.startsWith("#")) {
                     continue;
                 }
 
                 /*
+                 * ==================================================
+                 * Section
+                 *
                  * [netcraft:xxx]
+                 * ==================================================
                  */
+
                 if (line.startsWith("[")
                         && line.endsWith("]")) {
 
-                    currentSection = line.substring(
-                            1,
-                            line.length() - 1
-                    ).trim();
+                    currentSection =
+                            line.substring(
+                                    1,
+                                    line.length() - 1
+                            ).trim();
 
                     if (!currentSection
                             .toLowerCase(Locale.ROOT)
-                            .startsWith(NAMESPACE + ":")) {
+                            .startsWith(
+                                    NAMESPACE + ":"
+                            )) {
 
                         currentSection = null;
+
                     } else {
 
                         entityValues.computeIfAbsent(
                                 currentSection,
-                                k -> new LinkedHashMap<>()
+                                ignored ->
+                                        new LinkedHashMap<>()
                         );
                     }
 
@@ -266,60 +268,41 @@ public class NetCraftConfig {
                     continue;
                 }
 
-                int equal = line.indexOf('=');
+                /*
+                 * 找 =
+                 */
+                int equal =
+                        line.indexOf('=');
 
                 if (equal <= 0) {
                     continue;
                 }
 
-                String key = line.substring(
-                        0,
-                        equal
-                ).trim();
+                String key =
+                        line.substring(
+                                0,
+                                equal
+                        ).trim();
 
-                String value = line.substring(
-                        equal + 1
-                ).trim();
-
-                /*
-                 * 去掉行尾注释。
-                 *
-                 * drops 比较特殊，
-                 * 所以只对普通数值做处理。
-                 */
-                if (!key.equals("drops")) {
-
-                    int comment = value.indexOf('#');
-
-                    if (comment >= 0) {
-                        value = value
-                                .substring(0, comment)
-                                .trim();
-                    }
-                }
+                String value =
+                        line.substring(
+                                equal + 1
+                        ).trim();
 
                 /*
-                 * drops_replace
-                 */
-                if (key.equals("drops_replace")) {
-
-                    dropReplace.put(
-                            currentSection,
-                            Boolean.parseBoolean(value)
-                    );
-
-                    continue;
-                }
-
-                /*
+                 * ==================================================
                  * drops
+                 * ==================================================
                  */
-                if (key.equals("drops")) {
 
-                    List<DropEntry> parsed =
+                if ("drops".equalsIgnoreCase(key)) {
+
+                    List<NetCraftDropManager.DropEntry>
+                            parsed =
                             parseDrops(value);
 
                     if (!parsed.isEmpty()) {
+
                         drops.put(
                                 currentSection,
                                 parsed
@@ -330,25 +313,71 @@ public class NetCraftConfig {
                 }
 
                 /*
-                 * Attribute
+                 * ==================================================
+                 * drops_replace
+                 * ==================================================
                  */
+
+                if ("drops_replace"
+                        .equalsIgnoreCase(key)) {
+
+                    dropReplace.put(
+                            currentSection,
+                            parseBoolean(value)
+                    );
+
+                    continue;
+                }
+
+                /*
+                 * ==================================================
+                 * 属性
+                 * ==================================================
+                 */
+
                 if (!ATTRIBUTES.containsKey(key)) {
                     continue;
+                }
+
+                /*
+                 * 去掉普通属性的行尾注释。
+                 */
+                int comment =
+                        value.indexOf('#');
+
+                if (comment >= 0) {
+
+                    value =
+                            value.substring(
+                                    0,
+                                    comment
+                            ).trim();
                 }
 
                 try {
 
                     double number =
-                            Double.parseDouble(value);
+                            Double.parseDouble(
+                                    value
+                            );
+
+                    if (Double.isNaN(number)
+                            || Double.isInfinite(number)) {
+
+                        continue;
+                    }
 
                     entityValues
                             .get(currentSection)
-                            .put(key, number);
+                            .put(
+                                    key,
+                                    number
+                            );
 
-                } catch (NumberFormatException ignored) {
+                } catch (NumberFormatException e) {
 
                     LOGGER.warn(
-                            "[NetCraftToolkit] 无法解析数值: {} = {}",
+                            "[NetCraftToolkit] 无法解析属性 {} = {}",
                             key,
                             value
                     );
@@ -356,13 +385,16 @@ public class NetCraftConfig {
             }
 
             /*
-             * 配置加载完后，
-             * 再扫描一次 NetCraft 注册表。
+             * 扫描当前实际存在的 NetCraft EntityType。
              *
-             * 这样新版本 NetCraft 新增的实体
-             * 也可以自动进入配置。
+             * 新增实体会自动补进内存。
              */
             scanNetCraftTypes();
+
+            /*
+             * 把掉落配置交给 DropManager。
+             */
+            syncDropManager();
 
             LOGGER.info(
                     "[NetCraftToolkit] 配置加载完成: {} 个生物, {} 个掉落配置",
@@ -381,7 +413,7 @@ public class NetCraftConfig {
 
     /*
      * ============================================================
-     * 扫描 NetCraft EntityType
+     * 扫描 NetCraft 生物
      * ============================================================
      */
 
@@ -397,28 +429,23 @@ public class NetCraftConfig {
                 continue;
             }
 
-            /*
-             * 只认 netcraft 命名空间。
-             *
-             * 不 import NetCraft。
-             */
             if (!NAMESPACE.equalsIgnoreCase(
-                    id.getNamespace())) {
-
+                    id.getNamespace()
+            )) {
                 continue;
             }
 
             EntityType<?> type =
-                    ForgeRegistries.ENTITY_TYPES.getValue(id);
+                    ForgeRegistries.ENTITY_TYPES.getValue(
+                            id
+                    );
 
             if (type == null) {
                 continue;
             }
 
             /*
-             * 我们只处理 LivingEntity。
-             *
-             * 投射物、环境实体等不改 Attribute。
+             * 只处理 LivingEntity。
              */
             if (!isLivingEntityType(type)) {
                 continue;
@@ -426,20 +453,25 @@ public class NetCraftConfig {
 
             count++;
 
-            String entityId = id.toString();
-
-            Map<String, Double> base =
-                    readDefaultAttributes(type);
-
-            BASE_VALUES.putIfAbsent(
-                    entityId,
-                    new LinkedHashMap<>(base)
-            );
+            String entityId =
+                    id.toString();
 
             if (!entityValues.containsKey(entityId)) {
 
                 Map<String, Double> values =
-                        new LinkedHashMap<>(base);
+                        new LinkedHashMap<>();
+
+                /*
+                 * -1 = 不修改。
+                 */
+                for (String key :
+                        ATTRIBUTES.keySet()) {
+
+                    values.put(
+                            key,
+                            -1.0D
+                    );
+                }
 
                 entityValues.put(
                         entityId,
@@ -447,20 +479,24 @@ public class NetCraftConfig {
                 );
 
                 added++;
+
             } else {
 
-                Map<String, Double> values =
-                        entityValues.get(entityId);
-
                 /*
-                 * 如果以后 Minecraft/NetCraft
-                 * 新增 Attribute，则自动补进去。
+                 * 如果以后增加新的属性，
+                 * 自动补一个 -1。
                  */
-                for (String key : ATTRIBUTES.keySet()) {
+                Map<String, Double> values =
+                        entityValues.get(
+                                entityId
+                        );
+
+                for (String key :
+                        ATTRIBUTES.keySet()) {
 
                     values.putIfAbsent(
                             key,
-                            base.getOrDefault(key, -1.0)
+                            -1.0D
                     );
                 }
             }
@@ -473,6 +509,12 @@ public class NetCraftConfig {
         );
     }
 
+    /*
+     * ============================================================
+     * 判断 EntityType 是否属于 LivingEntity
+     * ============================================================
+     */
+
     private boolean isLivingEntityType(
             EntityType<?> type
     ) {
@@ -483,15 +525,15 @@ public class NetCraftConfig {
                     type.getBaseClass();
 
             return LivingEntity.class
-                    .isAssignableFrom(entityClass);
+                    .isAssignableFrom(
+                            entityClass
+                    );
 
         } catch (Throwable ignored) {
 
             /*
-             * 某些 Forge/Mohist 环境下
-             * getBaseClass 可能表现不同。
-             *
-             * 这里不让扫描失败。
+             * 某些混合端环境如果这里异常，
+             * 不让整个配置加载失败。
              */
             return true;
         }
@@ -499,483 +541,77 @@ public class NetCraftConfig {
 
     /*
      * ============================================================
-     * 读取原版默认 Attribute
+     * 掉落配置同步
      * ============================================================
      */
 
-    private Map<String, Double> readDefaultAttributes(
-            EntityType<?> type
-    ) {
+    private void syncDropManager() {
 
-        Map<String, Double> result =
-                new LinkedHashMap<>();
+        NetCraftDropManager manager =
+                NetCraftToolkit.getDropManager();
 
-        /*
-         * 这里只初始化为 -1。
-         *
-         * 真正实体生成后，
-         * 我们会从 AttributeInstance
-         * 再取得一次真实 base value。
-         */
-        for (String key : ATTRIBUTES.keySet()) {
-
-            result.put(key, -1.0);
-        }
-
-        return result;
-    }
-
-    /*
-     * ============================================================
-     * EntityJoinLevelEvent
-     * ============================================================
-     */
-
-    @SubscribeEvent(priority = EventPriority.NORMAL)
-    public void onEntityJoin(
-            EntityJoinLevelEvent event
-    ) {
-
-        if (event.getLevel().isClientSide()) {
+        if (manager == null) {
             return;
         }
 
-        if (!(event.getEntity()
-                instanceof LivingEntity living)) {
+        manager.clear();
 
-            return;
+        for (Map.Entry<String,
+                List<NetCraftDropManager.DropEntry>> entry :
+                drops.entrySet()) {
+
+            String entityId =
+                    entry.getKey();
+
+            List<NetCraftDropManager.DropEntry>
+                    entries =
+                    entry.getValue();
+
+            boolean replace =
+                    dropReplace.getOrDefault(
+                            entityId,
+                            true
+                    );
+
+            manager.setDropConfig(
+                    entityId,
+                    replace,
+                    entries
+            );
         }
 
-        if (!isNetCraftEntity(living)) {
-            return;
-        }
-
-        /*
-         * 第一次遇到实体时，
-         * 记录它真实的原始 Attribute。
-         */
-        rememberBaseValues(living);
-
-        /*
-         * 应用配置。
-         */
-        applyTo(living);
-    }
-
-    /*
-     * ============================================================
-     * 判断是否 NetCraft
-     * ============================================================
-     */
-
-    public boolean isNetCraftEntity(
-            LivingEntity living
-    ) {
-
-        ResourceLocation key =
-                ForgeRegistries.ENTITY_TYPES.getKey(
-                        living.getType()
-                );
-
-        return key != null
-                && NAMESPACE.equalsIgnoreCase(
-                key.getNamespace()
+        LOGGER.info(
+                "[NetCraftToolkit] 掉落配置已同步: {} 个",
+                drops.size()
         );
     }
 
     /*
      * ============================================================
-     * 保存实体原始 Attribute
-     * ============================================================
-     */
-
-    private void rememberBaseValues(
-            LivingEntity living
-    ) {
-
-        ResourceLocation id =
-                ForgeRegistries.ENTITY_TYPES.getKey(
-                        living.getType()
-                );
-
-        if (id == null) {
-            return;
-        }
-
-        String entityId =
-                id.toString();
-
-        Map<String, Double> base =
-                BASE_VALUES.computeIfAbsent(
-                        entityId,
-                        k -> new LinkedHashMap<>()
-                );
-
-        for (Map.Entry<String, Attribute> entry :
-                ATTRIBUTES.entrySet()) {
-
-            String key = entry.getKey();
-            Attribute attribute = entry.getValue();
-
-            if (base.containsKey(key)
-                    && base.get(key) != null
-                    && base.get(key) > 0) {
-
-                continue;
-            }
-
-            AttributeInstance instance =
-                    living.getAttribute(attribute);
-
-            if (instance == null) {
-                base.put(key, -1.0);
-                continue;
-            }
-
-            base.put(
-                    key,
-                    instance.getBaseValue()
-            );
-        }
-    }
-
-    /*
-     * ============================================================
-     * 应用属性
-     * ============================================================
-     */
-
-    public void applyTo(
-            LivingEntity living
-    ) {
-
-        if (!isNetCraftEntity(living)) {
-            return;
-        }
-
-        ResourceLocation id =
-                ForgeRegistries.ENTITY_TYPES.getKey(
-                        living.getType()
-                );
-
-        if (id == null) {
-            return;
-        }
-
-        String entityId =
-                id.toString();
-
-        Map<String, Double> values =
-                entityValues.get(entityId);
-
-        if (values == null) {
-            return;
-        }
-
-        /*
-         * 第一次应用之前先保存真实原值。
-         */
-        rememberBaseValues(living);
-
-        Map<String, Double> base =
-                BASE_VALUES.get(entityId);
-
-        /*
-         * 记录当前生命比例。
-         *
-         * 例如：
-         *
-         * 原最大生命 100
-         * 当前生命 50
-         *
-         * 配置修改最大生命 1000
-         *
-         * 最后生命 = 500
-         *
-         * 而不是直接变成 1000。
-         */
-        float oldHealth =
-                living.getHealth();
-
-        float oldMax =
-                living.getMaxHealth();
-
-        double healthRatio = 1.0;
-
-        if (oldMax > 0.0f) {
-
-            healthRatio =
-                    oldHealth / oldMax;
-
-            if (healthRatio < 0.0) {
-                healthRatio = 0.0;
-            }
-
-            if (healthRatio > 1.0) {
-                healthRatio = 1.0;
-            }
-        }
-
-        boolean changed = false;
-
-        for (Map.Entry<String, Attribute> entry :
-                ATTRIBUTES.entrySet()) {
-
-            String key =
-                    entry.getKey();
-
-            Attribute attribute =
-                    entry.getValue();
-
-            Double configured =
-                    values.get(key);
-
-            if (configured == null) {
-                continue;
-            }
-
-            /*
-             * -1 = 不修改。
-             */
-            if (configured < 0.0) {
-                continue;
-            }
-
-            AttributeInstance instance =
-                    living.getAttribute(attribute);
-
-            if (instance == null) {
-                continue;
-            }
-
-            /*
-             * 每次直接设置 BASE_VALUE。
-             *
-             * 不使用 +=。
-             */
-            instance.setBaseValue(
-                    configured
-            );
-
-            changed = true;
-        }
-
-        if (!changed) {
-            return;
-        }
-
-        /*
-         * 最大生命变化后，
-         * 按比例恢复当前生命。
-         */
-        float newMax =
-                living.getMaxHealth();
-
-        if (newMax > 0.0f) {
-
-            float newHealth =
-                    (float) (
-                            newMax * healthRatio
-                    );
-
-            if (newHealth < 0.0f) {
-                newHealth = 0.0f;
-            }
-
-            if (newHealth > newMax) {
-                newHealth = newMax;
-            }
-
-            living.setHealth(
-                    newHealth
-            );
-        }
-    }
-
-    /*
-     * ============================================================
-     * 掉落
-     * ============================================================
-     */
-
-    @SubscribeEvent(priority = EventPriority.NORMAL)
-    public void onLivingDrops(
-            LivingDropsEvent event
-    ) {
-
-        if (event.getEntity()
-                .level()
-                .isClientSide()) {
-
-            return;
-        }
-
-        LivingEntity entity =
-                event.getEntity();
-
-        if (!isNetCraftEntity(entity)) {
-            return;
-        }
-
-        ResourceLocation id =
-                ForgeRegistries.ENTITY_TYPES.getKey(
-                        entity.getType()
-                );
-
-        if (id == null) {
-            return;
-        }
-
-        String entityId =
-                id.toString();
-
-        List<DropEntry> entries =
-                drops.get(entityId);
-
-        if (entries == null
-                || entries.isEmpty()) {
-
-            return;
-        }
-
-        boolean replace =
-                dropReplace.getOrDefault(
-                        entityId,
-                        true
-                );
-
-        /*
-         * true：
-         * 完全替换原版掉落。
-         */
-        if (replace) {
-            event.getDrops().clear();
-        }
-
-        RandomSource random =
-                entity.level().getRandom();
-
-        int spawned = 0;
-
-        for (DropEntry entry : entries) {
-
-            if (entry.chance <= 0.0) {
-                continue;
-            }
-
-            if (random.nextDouble()
-                    > entry.chance) {
-
-                continue;
-            }
-
-            ResourceLocation itemId;
-
-            try {
-
-                itemId =
-                        ResourceLocation.parse(
-                                entry.itemId
-                        );
-
-            } catch (Throwable t) {
-
-                LOGGER.warn(
-                        "[NetCraftToolkit] 非法掉落物ID: {}",
-                        entry.itemId
-                );
-
-                continue;
-            }
-
-            Item item =
-                    ForgeRegistries.ITEMS
-                            .getValue(itemId);
-
-            if (item == null) {
-
-                LOGGER.warn(
-                        "[NetCraftToolkit] 找不到掉落物: {}",
-                        entry.itemId
-                );
-
-                continue;
-            }
-
-            int count =
-                    entry.rollCount(random);
-
-            if (count <= 0) {
-                continue;
-            }
-
-            ItemStack stack =
-                    new ItemStack(
-                            item,
-                            count
-                    );
-
-            double x =
-                    entity.getX()
-                            + (random.nextDouble() - 0.5)
-                            * 0.8;
-
-            double y =
-                    entity.getY()
-                            + 0.5;
-
-            double z =
-                    entity.getZ()
-                            + (random.nextDouble() - 0.5)
-                            * 0.8;
-
-            ItemEntity itemEntity =
-                    new ItemEntity(
-                            entity.level(),
-                            x,
-                            y,
-                            z,
-                            stack
-                    );
-
-            itemEntity.setDefaultPickUpDelay();
-
-            event.getDrops().add(
-                    itemEntity
-            );
-
-            spawned++;
-        }
-
-        if (spawned > 0) {
-
-            LOGGER.debug(
-                    "[NetCraftToolkit] {} 生成 {} 项自定义掉落",
-                    entityId,
-                    spawned
-            );
-        }
-    }
-
-    /*
-     * ============================================================
-     * 掉落解析
+     * 解析掉落
      *
      * 格式：
      *
      * drops = [
      *   minecraft:diamond|1|3|0.5,
-     *   netcraft:item_xxx|1|1|1.0
+     *   minecraft:emerald|1|1|1.0
      * ]
      *
+     * 也支持：
+     *
+     * minecraft:diamond|1|0.5
+     *
+     * 表示：
+     * 数量固定 1
+     * 概率 50%
      * ============================================================
      */
 
-    private List<DropEntry> parseDrops(
-            String value
-    ) {
+    private List<NetCraftDropManager.DropEntry>
+    parseDrops(String value) {
 
-        List<DropEntry> result =
+        List<NetCraftDropManager.DropEntry>
+                result =
                 new ArrayList<>();
 
         if (value == null) {
@@ -985,12 +621,17 @@ public class NetCraftConfig {
         String text =
                 value.trim();
 
+        /*
+         * 去掉数组的 [ ]
+         */
         if (text.startsWith("[")) {
+
             text =
                     text.substring(1);
         }
 
         if (text.endsWith("]")) {
+
             text =
                     text.substring(
                             0,
@@ -998,7 +639,8 @@ public class NetCraftConfig {
                     );
         }
 
-        text = text.trim();
+        text =
+                text.trim();
 
         if (text.isEmpty()) {
             return result;
@@ -1018,6 +660,21 @@ public class NetCraftConfig {
 
             if (entry.isEmpty()) {
                 continue;
+            }
+
+            /*
+             * 如果使用了引号，
+             * 自动去掉。
+             */
+            if (entry.startsWith("\"")
+                    && entry.endsWith("\"")
+                    && entry.length() >= 2) {
+
+                entry =
+                        entry.substring(
+                                1,
+                                entry.length() - 1
+                        );
             }
 
             String[] fields =
@@ -1070,7 +727,8 @@ public class NetCraftConfig {
                                     fields[1].trim()
                             );
 
-                    max = min;
+                    max =
+                            min;
 
                     chance =
                             Double.parseDouble(
@@ -1078,6 +736,9 @@ public class NetCraftConfig {
                             );
                 }
 
+                /*
+                 * 数量最少 0。
+                 */
                 if (min < 0) {
                     min = 0;
                 }
@@ -1086,16 +747,19 @@ public class NetCraftConfig {
                     max = min;
                 }
 
-                if (chance < 0.0) {
-                    chance = 0.0;
+                /*
+                 * 概率限制在 0~1。
+                 */
+                if (chance < 0.0D) {
+                    chance = 0.0D;
                 }
 
-                if (chance > 1.0) {
-                    chance = 1.0;
+                if (chance > 1.0D) {
+                    chance = 1.0D;
                 }
 
                 result.add(
-                        new DropEntry(
+                        new NetCraftDropManager.DropEntry(
                                 itemId,
                                 min,
                                 max,
@@ -1113,6 +777,32 @@ public class NetCraftConfig {
         }
 
         return result;
+    }
+
+    /*
+     * ============================================================
+     * Boolean
+     * ============================================================
+     */
+
+    private boolean parseBoolean(
+            String value
+    ) {
+
+        if (value == null) {
+            return false;
+        }
+
+        String normalized =
+                value.trim()
+                        .toLowerCase(
+                                Locale.ROOT
+                        );
+
+        return normalized.equals("true")
+                || normalized.equals("yes")
+                || normalized.equals("1")
+                || normalized.equals("on");
     }
 
     /*
@@ -1153,7 +843,11 @@ public class NetCraftConfig {
             );
 
             out.append(
-                    "# 修改保存后会自动热加载\n"
+                    "# 属性会直接设置为指定 BaseValue\n"
+            );
+
+            out.append(
+                    "# 掉落概率：1.0 = 100%，0.5 = 50%\n"
             );
 
             out.append(
@@ -1171,15 +865,23 @@ public class NetCraftConfig {
 
             Collections.sort(ids);
 
-            for (String entityId : ids) {
+            for (String entityId :
+                    ids) {
 
                 out.append("\n");
+
                 out.append("[")
                         .append(entityId)
                         .append("]\n");
 
                 Map<String, Double> values =
-                        entityValues.get(entityId);
+                        entityValues.get(
+                                entityId
+                        );
+
+                if (values == null) {
+                    continue;
+                }
 
                 for (String key :
                         ATTRIBUTES.keySet()) {
@@ -1187,16 +889,21 @@ public class NetCraftConfig {
                     double value =
                             values.getOrDefault(
                                     key,
-                                    -1.0
+                                    -1.0D
                             );
 
                     out.append(key)
                             .append(" = ")
-                            .append(formatDouble(value))
+                            .append(
+                                    formatDouble(
+                                            value
+                                    )
+                            )
                             .append("\n");
                 }
 
-                List<DropEntry> entityDrops =
+                List<NetCraftDropManager.DropEntry>
+                        entityDrops =
                         drops.get(entityId);
 
                 if (entityDrops != null
@@ -1214,21 +921,34 @@ public class NetCraftConfig {
                             out.append(", ");
                         }
 
-                        DropEntry d =
+                        NetCraftDropManager.DropEntry
+                                drop =
                                 entityDrops.get(i);
 
-                        out.append(d.itemId)
+                        out.append(
+                                        drop.itemId()
+                                )
                                 .append("|")
-                                .append(d.minCount)
+                                .append(
+                                        drop.minCount()
+                                )
                                 .append("|")
-                                .append(d.maxCount)
+                                .append(
+                                        drop.maxCount()
+                                )
                                 .append("|")
-                                .append(formatDouble(d.chance));
+                                .append(
+                                        formatDouble(
+                                                drop.chance()
+                                        )
+                                );
                     }
 
                     out.append("]\n");
 
-                    out.append("drops_replace = ")
+                    out.append(
+                                    "drops_replace = "
+                            )
                             .append(
                                     dropReplace.getOrDefault(
                                             entityId,
@@ -1261,6 +981,12 @@ public class NetCraftConfig {
             );
         }
     }
+
+    /*
+     * ============================================================
+     * Double 格式化
+     * ============================================================
+     */
 
     private String formatDouble(
             double value
@@ -1317,37 +1043,51 @@ public class NetCraftConfig {
                         directory
                 );
 
-                try (WatchService watchService =
-                             FileSystems
-                                     .getDefault()
-                                     .newWatchService()) {
+                try (
+                        WatchService watchService =
+                                FileSystems
+                                        .getDefault()
+                                        .newWatchService()
+                ) {
 
                     directory.register(
                             watchService,
-                            StandardWatchEventKinds.ENTRY_MODIFY,
-                            StandardWatchEventKinds.ENTRY_CREATE
+                            StandardWatchEventKinds
+                                    .ENTRY_MODIFY,
+                            StandardWatchEventKinds
+                                    .ENTRY_CREATE
                     );
 
-                    while (watching
-                            && !Thread.currentThread()
-                            .isInterrupted()) {
+                    while (
+                            watching
+                                    && !Thread.currentThread()
+                                    .isInterrupted()
+                    ) {
 
                         WatchKey key;
 
                         try {
+
                             key =
                                     watchService.take();
-                        } catch (InterruptedException e) {
+
+                        } catch (
+                                InterruptedException e
+                        ) {
+
                             Thread.currentThread()
                                     .interrupt();
+
                             break;
                         }
 
                         boolean changed =
                                 false;
 
-                        for (WatchEvent<?> event :
-                                key.pollEvents()) {
+                        for (
+                                WatchEvent<?> event :
+                                key.pollEvents()
+                        ) {
 
                             Object context =
                                     event.context();
@@ -1376,14 +1116,20 @@ public class NetCraftConfig {
                         }
 
                         /*
-                         * 防止编辑器连续写入
-                         * 导致读到半截文件。
+                         * 防止手机/编辑器保存文件时，
+                         * WatchService 过早触发。
                          */
                         try {
+
                             Thread.sleep(400);
-                        } catch (InterruptedException e) {
+
+                        } catch (
+                                InterruptedException e
+                        ) {
+
                             Thread.currentThread()
                                     .interrupt();
+
                             break;
                         }
 
@@ -1391,40 +1137,31 @@ public class NetCraftConfig {
                                 "[NetCraftToolkit] 检测到配置修改，开始热加载..."
                         );
 
+                        /*
+                         * 重新读取配置。
+                         */
                         load();
 
                         /*
-                         * Attribute 修改必须回到
-                         * Minecraft 主线程。
+                         * Minecraft 对实体的修改必须回主线程。
                          */
-                        MinecraftServer current =
+                        MinecraftServer currentServer =
                                 server;
 
-                        if (current != null) {
+                        if (currentServer != null) {
 
-                            current.execute(() -> {
+                            currentServer.execute(() -> {
 
-                                for (var level :
-                                        current.getAllLevels()) {
+                                NetCraftAttributeManager
+                                        manager =
+                                        NetCraftToolkit
+                                                .getAttributeManager();
 
-                                    for (var entity :
-                                            level.getEntities()
-                                                    .getAll()) {
-
-                                        if (entity
-                                                instanceof LivingEntity living
-                                                && isNetCraftEntity(living)) {
-
-                                            rememberBaseValues(
-                                                    living
-                                            );
-
-                                            applyTo(
-                                                    living
-                                            );
-                                        }
-                                    }
+                                if (manager == null) {
+                                    return;
                                 }
+
+                                manager.reloadAllEntities();
 
                                 LOGGER.info(
                                         "[NetCraftToolkit] 热加载应用完成"
@@ -1454,16 +1191,11 @@ public class NetCraftConfig {
      * ============================================================
      */
 
-    @SubscribeEvent
-    public void onServerStopping(
-            ServerStoppingEvent event
-    ) {
+    public void stopWatching() {
 
         watching = false;
 
         watcher.shutdownNow();
-
-        server = null;
     }
 
     /*
@@ -1480,7 +1212,8 @@ public class NetCraftConfig {
         );
     }
 
-    public Map<String, List<DropEntry>>
+    public Map<String,
+            List<NetCraftDropManager.DropEntry>>
     getDrops() {
 
         return Collections.unmodifiableMap(
@@ -1488,7 +1221,29 @@ public class NetCraftConfig {
         );
     }
 
+    public Map<String, Boolean>
+    getDropReplace() {
+
+        return Collections.unmodifiableMap(
+                dropReplace
+        );
+    }
+
     public Path getConfigPath() {
+
         return configPath;
+    }
+
+    public MinecraftServer getServer() {
+
+        return server;
+    }
+
+    public static Map<String, Attribute>
+    getSupportedAttributes() {
+
+        return Collections.unmodifiableMap(
+                ATTRIBUTES
+        );
     }
 }
