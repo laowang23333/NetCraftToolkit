@@ -24,6 +24,10 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.regex.Pattern;
+import java.util.regex.Matcher;
+import java.util.Comparator;
+import java.lang.reflect.Method;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -1177,40 +1181,34 @@ public class NetCraftConfig {
         out.append("# NetCraft Toolkit\n");
         out.append("# 自动生成配置文件\n");
         out.append("# Minecraft 1.20.1 / Forge 47.4.13\n");
-        out.append("#\n");
-        out.append("# 只处理 NetCraft 生物。\n");
         out.append("# ============================================================\n\n");
 
-        out.append("# ============================================================\n");
-        out.append("# 一、Boss\n");
-        out.append("# ============================================================\n\n");
+        out.append("# ================================================================\n");
+        out.append("# BOSS\n");
+        out.append("# ================================================================\n\n");
 
         generateCategoryConfig(
                 out,
                 "boss"
         );
 
-        out.append("# ============================================================\n");
-        out.append("# 二、Elite\n");
-        out.append("# ============================================================\n\n");
+        out.append("# ================================================================\n");
+        out.append("# 精英\n");
+        out.append("# ================================================================\n\n");
 
         generateCategoryConfig(
                 out,
                 "elite"
         );
 
-        out.append("# ============================================================\n");
-        out.append("# 三、Mob\n");
-        out.append("# ============================================================\n\n");
+        out.append("# ================================================================\n");
+        out.append("# 小怪\n");
+        out.append("# ================================================================\n\n");
 
         generateCategoryConfig(
                 out,
                 "mob"
         );
-
-        out.append("# ============================================================\n");
-        out.append("# 四、Equipment\n");
-        out.append("# ============================================================\n\n");
 
         generateEquipmentConfig(out);
 
@@ -1791,42 +1789,327 @@ public class NetCraftConfig {
     }
 
     /**
-     * 生成装备配置。
+     * 自动读取 NetCraft 全部可覆盖的装备。
      *
-     * 这里保留结构，实际 NetCraft 装备数值后续由
-     * EquipmentOverrideWriter / Reflection 负责读取。
+     * 不把 NetCraft JAR 加入编译依赖：
+     * 运行时通过反射读取 EquipmentStatConfig 的真实默认值。
+     * 工具类物品不匹配 weapon/equipment 装备 ID，因此不会生成。
      */
     private void generateEquipmentConfig(
             StringBuilder out
     ) {
-        out.append("# NetCraft 装备属性覆盖\n");
-        out.append("#\n");
-        out.append("# 支持的职业：\n");
-        out.append("# knight\n");
-        out.append("# archer\n");
-        out.append("# mage\n");
-        out.append("# summoner\n");
-        out.append("# dragonknight\n");
-        out.append("# wararcher\n");
-        out.append("#\n");
-        out.append("# 支持位置：\n");
-        out.append("# mainhand / offhand / helmet / chestplate / leggings / boots\n");
-        out.append("#\n");
-        out.append("# 支持属性：\n");
-        out.append("# meleeDamage / rangedDamage / magicDamage\n");
-        out.append("# physicalDefense / magicDefense / health / armor\n");
-        out.append("\n");
+        out.append("# ================================================================\n");
+        out.append("# 装备\n");
+        out.append("# ================================================================\n");
+        out.append("# 自动读取 NetCraft 装备注册名和默认数值。工具类物品不生成。\n");
+        out.append("# 数值后面的“NetCraft默认值”是读取到的原始默认值。\n");
+        out.append("# 直接修改等号左边的数值即可覆盖对应属性。\n\n");
 
-        out.append("# 示例：\n");
-        out.append("# [equipment.\"weapon_knight_t1_mainhand\"]\n");
-        out.append("# meleeDamage = 10\n");
-        out.append("#\n");
-        out.append("# [equipment.\"equipment_knight_t1_helmet\"]\n");
-        out.append("# physicalDefense = 5\n");
-        out.append("# magicDefense = 3\n");
-        out.append("# health = 20\n");
-        out.append("# armor = 2\n");
+        Pattern pattern = Pattern.compile(
+                "^(?:weapon|equipment)_(knight|archer|mage|summoner|dragonknight|wararcher)_(t\\d+|legend\\d+)_(?:[a-z]+_)?(mhand|hand|[1-4])$"
+        );
+
+        List<String> ids = new ArrayList<>();
+
+        for (var entry : ForgeRegistries.ITEMS.getEntries()) {
+            ResourceLocation id = entry.getKey();
+
+            if (id == null || !"netcraft".equals(id.getNamespace())) {
+                continue;
+            }
+
+            String path = id.getPath();
+
+            if (path == null || !pattern.matcher(path).matches()) {
+                continue;
+            }
+
+            ids.add(path);
+        }
+
+        ids.sort(Comparator.comparingInt(this::equipmentSortTier)
+                .thenComparingInt(this::equipmentSortClass)
+                .thenComparingInt(this::equipmentSortSlot)
+                .thenComparing(s -> s));
+
+        for (String id : ids) {
+            writeEquipmentEntry(out, id, pattern);
+        }
+
+        if (ids.isEmpty()) {
+            out.append("# 未读取到 NetCraft 装备。请确认 NetCraft 已加载。\n\n");
+        }
+    }
+
+    /** 写入一个装备的完整配置。 */
+    private void writeEquipmentEntry(
+            StringBuilder out,
+            String id,
+            Pattern pattern
+    ) {
+        Matcher matcher = pattern.matcher(id);
+
+        if (!matcher.matches()) {
+            return;
+        }
+
+        String classType = matcher.group(1);
+        String tierName = matcher.group(2);
+        String slotCode = matcher.group(3);
+
+        String displayName = getItemChineseName("netcraft:" + id);
+
+        out.append("# ------------------------------------------------------------\n");
+        out.append("# 【").append(displayName).append("】\n");
+        out.append("# 物品注册ID：netcraft:").append(id).append("\n");
+        out.append("# 职业：").append(equipmentClassChineseName(classType))
+                .append("    品阶：").append(equipmentTierDisplayName(tierName))
+                .append("    部位：").append(equipmentSlotChineseName(slotCode)).append("\n");
+        out.append("# ------------------------------------------------------------\n");
+        out.append("[equipment.\"").append(id).append("\"]\n");
+
+        Map<String, Double> defaults = readNetCraftEquipmentDefaults(
+                classType,
+                tierName,
+                slotCode
+        );
+
+        writeEquipmentValue(out, "meleeDamage", "近战伤害", defaults.get("meleeDamage"));
+        writeEquipmentValue(out, "rangedDamage", "远程伤害", defaults.get("rangedDamage"));
+        writeEquipmentValue(out, "magicDamage", "魔法伤害", defaults.get("magicDamage"));
+        writeEquipmentValue(out, "physicalDefense", "物理防御", defaults.get("physicalDefense"));
+        writeEquipmentValue(out, "magicDefense", "魔法防御", defaults.get("magicDefense"));
+        writeEquipmentValue(out, "health", "额外生命值", defaults.get("health"));
+        writeEquipmentValue(out, "armor", "护甲值", defaults.get("armor"));
+
         out.append("\n");
+    }
+
+    /** 通过反射读取 NetCraft EquipmentStatConfig 的真实默认值。 */
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    private Map<String, Double> readNetCraftEquipmentDefaults(
+            String classType,
+            String tierName,
+            String slotCode
+    ) {
+        Map<String, Double> values = new LinkedHashMap<>();
+
+        String[] fields = {
+                "MELEE_DAMAGE",
+                "RANGED_DAMAGE",
+                "MAGIC_DAMAGE",
+                "PHYSICAL_DEFENSE",
+                "MAGIC_DEFENSE",
+                "HEALTH",
+                "ARMOR"
+        };
+
+        String[] keys = {
+                "meleeDamage",
+                "rangedDamage",
+                "magicDamage",
+                "physicalDefense",
+                "magicDefense",
+                "health",
+                "armor"
+        };
+
+        try {
+            Class<?> configClass = Class.forName(
+                    "com.jiufeng.netcraft.config.EquipmentStatConfig"
+            );
+            Class<?> groupClass = Class.forName(
+                    "com.jiufeng.netcraft.config.EquipmentStatConfig$Group"
+            );
+            Class<?> classClass = Class.forName(
+                    "com.jiufeng.netcraft.config.EquipmentStatConfig$ClassType"
+            );
+            Class<?> slotClass = Class.forName(
+                    "com.jiufeng.netcraft.config.EquipmentStatConfig$Slot"
+            );
+            Class<?> fieldClass = Class.forName(
+                    "com.jiufeng.netcraft.config.EquipmentStatConfig$Field"
+            );
+
+            Method getMethod = configClass.getMethod(
+                    "get",
+                    groupClass,
+                    classClass,
+                    slotClass,
+                    fieldClass
+            );
+
+            Object group = Enum.valueOf(
+                    (Class) groupClass,
+                    equipmentGroupName(tierName)
+            );
+            Object clazz = Enum.valueOf(
+                    (Class) classClass,
+                    classType.toUpperCase(Locale.ROOT)
+            );
+            Object slot = Enum.valueOf(
+                    (Class) slotClass,
+                    equipmentSlotEnumName(slotCode)
+            );
+
+            for (int i = 0; i < fields.length; i++) {
+                Object field = Enum.valueOf(
+                        (Class) fieldClass,
+                        fields[i]
+                );
+
+                Object result = getMethod.invoke(
+                        null,
+                        group,
+                        clazz,
+                        slot,
+                        field
+                );
+
+                if (result instanceof Number number) {
+                    values.put(keys[i], number.doubleValue());
+                }
+            }
+        } catch (Throwable e) {
+            NetCraftToolkit.LOGGER.warn(
+                    "[NetCraftToolkit] 读取 NetCraft 装备默认值失败: {}",
+                    tierName + "." + classType + "." + slotCode,
+                    e
+            );
+        }
+
+        for (String key : keys) {
+            values.putIfAbsent(key, 0D);
+        }
+
+        return values;
+    }
+
+    private void writeEquipmentValue(
+            StringBuilder out,
+            String key,
+            String chineseName,
+            Double value
+    ) {
+        double number = value == null ? 0D : value;
+
+        out.append(key)
+                .append(" = ")
+                .append(formatConfigNumber(number))
+                .append(" # ")
+                .append(chineseName)
+                .append("（NetCraft默认值：")
+                .append(formatConfigNumber(number))
+                .append("）\n");
+    }
+
+    private String getItemChineseName(String itemId) {
+        try {
+            var item = ForgeRegistries.ITEMS.getValue(
+                    ResourceLocation.tryParse(itemId)
+            );
+
+            if (item != null) {
+                String name = readChineseNameFromLanguage(
+                        item.getDescriptionId()
+                );
+
+                if (name != null && !name.isBlank()) {
+                    return name;
+                }
+            }
+        } catch (Exception ignored) {
+        }
+
+        ResourceLocation id = ResourceLocation.tryParse(itemId);
+        return id == null ? itemId : id.getPath();
+    }
+
+    private String equipmentGroupName(String tierName) {
+        if (tierName.startsWith("legend")) {
+            return "LEGEND" + tierName.substring("legend".length());
+        }
+        return "TIER" + tierName.substring(1);
+    }
+
+    private String equipmentSlotEnumName(String slotCode) {
+        return switch (slotCode) {
+            case "mhand" -> "MAINHAND";
+            case "hand" -> "OFFHAND";
+            case "1" -> "HELMET";
+            case "2" -> "CHESTPLATE";
+            case "3" -> "LEGGINGS";
+            case "4" -> "BOOTS";
+            default -> "MAINHAND";
+        };
+    }
+
+    private String equipmentClassChineseName(String classType) {
+        return switch (classType) {
+            case "knight" -> "骑士";
+            case "archer" -> "弓箭手";
+            case "mage" -> "法师";
+            case "summoner" -> "召唤师";
+            case "dragonknight" -> "龙骑士";
+            case "wararcher" -> "战争弓手";
+            default -> classType;
+        };
+    }
+
+    private String equipmentTierDisplayName(String tierName) {
+        return tierName.toUpperCase(Locale.ROOT);
+    }
+
+    private String equipmentSlotChineseName(String slotCode) {
+        return switch (slotCode) {
+            case "mhand" -> "主手";
+            case "hand" -> "副手";
+            case "1" -> "头盔";
+            case "2" -> "胸甲";
+            case "3" -> "护腿";
+            case "4" -> "靴子";
+            default -> slotCode;
+        };
+    }
+
+    private int equipmentSortTier(String id) {
+        Matcher m = Pattern.compile("_(t\\d+|legend\\d+)_").matcher(id);
+        if (!m.find()) return 999;
+        String value = m.group(1);
+        if (value.startsWith("legend")) {
+            return 100 + Integer.parseInt(value.substring(6));
+        }
+        return Integer.parseInt(value.substring(1));
+    }
+
+    private int equipmentSortClass(String id) {
+        String[] classes = {
+                "knight", "archer", "mage", "summoner", "dragonknight", "wararcher"
+        };
+        for (int i = 0; i < classes.length; i++) {
+            if (id.contains("_" + classes[i] + "_")) return i;
+        }
+        return 999;
+    }
+
+    private int equipmentSortSlot(String id) {
+        if (id.endsWith("_mhand")) return 0;
+        if (id.endsWith("_hand")) return 1;
+        if (id.endsWith("_1")) return 2;
+        if (id.endsWith("_2")) return 3;
+        if (id.endsWith("_3")) return 4;
+        if (id.endsWith("_4")) return 5;
+        return 999;
+    }
+
+    private String formatConfigNumber(double value) {
+        if (Double.isNaN(value) || Double.isInfinite(value)) {
+            return "0";
+        }
+        if (value == Math.rint(value)) {
+            return Long.toString((long) value);
+        }
+        return Double.toString(value);
     }
 
     /**
