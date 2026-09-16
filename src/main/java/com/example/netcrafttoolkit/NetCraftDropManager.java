@@ -318,11 +318,10 @@ public class NetCraftDropManager {
             spawnDrop(entity, stack, event);
 
             NetCraftToolkit.LOGGER.info(
-                    "[NetCraftToolkit] Custom drop added: entity={}, item={}, amount={}, eventDropsNow={}",
+                    "[NetCraftToolkit] Custom drop spawned directly: entity={}, item={}, amount={}",
                     entityId,
                     entry.itemId(),
-                    amount,
-                    event.getDrops().size()
+                    amount
             );
         }
     }
@@ -400,7 +399,30 @@ public class NetCraftDropManager {
                 (ThreadLocalRandom.current().nextDouble() - 0.5D) * 0.1D
         );
 
-        event.getDrops().add(itemEntity);
+        /*
+         * 关键修复：
+         *
+         * 不再把自定义掉落物放进 LivingDropsEvent#getDrops()。
+         *
+         * 某些 NetCraft 生物自己的死亡掉落处理会继续操作这个列表，
+         * 导致我们明明已经 add 进去，最终世界里仍然看不到物品。
+         *
+         * 这里直接把 ItemEntity 加入服务器世界，
+         * 从事件列表中彻底脱离自定义掉落物的生命周期。
+         *
+         * replace=true 时，原始事件掉落已经在上面被清空，
+         * 因此不会再产生原始掉落。
+         */
+        boolean added = level.addFreshEntity(itemEntity);
+
+        if (!added) {
+            NetCraftToolkit.LOGGER.warn(
+                    "[NetCraftToolkit] Failed to spawn custom drop into world: entity={}, item={}, amount={}",
+                    entity.getType(),
+                    stack.getItem(),
+                    stack.getCount()
+            );
+        }
     }
 
     /**
