@@ -9,7 +9,6 @@ import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraftforge.event.entity.living.LivingDropsEvent;
-import net.minecraftforge.event.entity.EntityJoinLevelEvent;
 import net.minecraftforge.eventbus.api.EventPriority;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.registries.ForgeRegistries;
@@ -20,7 +19,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
-import java.util.UUID;
 
 /**
  * NetCraft 生物掉落管理器。
@@ -46,21 +44,6 @@ public class NetCraftDropManager {
      */
     private final Map<String, DropConfig> dropConfigs =
             new ConcurrentHashMap<>();
-
-    /**
-     * Boss 原版直接散落掉落的“进入世界前”拦截窗口。
-     *
-     * 这里只记录刚刚触发 LivingDropsEvent 的 NetCraft 生物的位置和时间，
-     * 不扫描、不删除世界中已经存在的物品。
-     */
-    private final Map<UUID, DirectDropSuppression> directDropSuppressions =
-            new ConcurrentHashMap<>();
-
-    /**
-     * Toolkit 自己生成的掉落使用 NBT 标记，避免被自己的拦截器拦掉。
-     */
-    private static final String CUSTOM_DROP_TAG =
-            "NetCraftToolkitCustomDrop";
 
     /**
      * 注册/更新一个生物的掉落配置。
@@ -243,29 +226,12 @@ public class NetCraftDropManager {
         }
 
         /*
-         * replace=true 时，除了清理 LivingDropsEvent 自带的掉落，
-         * 还登记一个极短的直接掉落拦截窗口。
+         * replace=true 时清理 LivingDropsEvent 自带的原版掉落。
          *
-         * NetCraft BossBase 后续可能直接 new ItemEntity + addFreshEntity，
-         * 这部分不会出现在 event.getDrops() 里。
+         * NetCraft BossBase 的直接散落掉落由 BossBaseMixin
+         * 在 spawnScatteredStacks() 入口处直接阻止。
          */
         if (config.replaceDrops()) {
-            directDropSuppressions.put(
-                    entity.getUUID(),
-                    new DirectDropSuppression(
-                            entity.getUUID(),
-                            entity.level().dimension(),
-                            entity.getX(),
-                            entity.getY(),
-                            entity.getZ(),
-                            System.currentTimeMillis() + 1500L
-                    )
-            );
-
-            NetCraftToolkit.LOGGER.info(
-                    "[NetCraftToolkit] Registered pre-insertion direct-drop suppression for {}",
-                    entityId
-            );
             int originalCount = event.getDrops().size();
             event.getDrops().clear();
             NetCraftToolkit.LOGGER.info(
@@ -364,72 +330,24 @@ public class NetCraftDropManager {
     }
 
     /**
-     * 在 ItemEntity 真正进入世界前拦截 NetCraft Boss 的直接散落掉落。
+     * 判断指定 NetCraft 生物的 Boss 原版直接散落掉落是否应该被 Mixin 拦截。
      *
-     * 这是“直接阻止生成”的无额外依赖方案：
-     * NetCraft 调用 addFreshEntity() 时，Forge 先触发这个事件；
-     * 这里取消事件，ItemEntity 不会进入世界。
+     * 这个方法不创建、不删除 ItemEntity，只返回拦截条件。
      */
-    @SubscribeEvent(priority = EventPriority.HIGHEST)
-    public void onEntityJoinLevel(EntityJoinLevelEvent event) {
-
-        if (!(event.getEntity() instanceof ItemEntity itemEntity)) {
-            return;
+    public boolean shouldBlockScatteredDrops(Entity entity) {
+        if (entity == null || entity.level().isClientSide()) {
+            return false;
         }
 
-        if (event.getLevel().isClientSide()) {
-            return;
+        String entityId = getEntityId(entity);
+        if (entityId == null || !entityId.startsWith("netcraft:")) {
+            return false;
         }
 
-        /*
-         * Toolkit 自己生成的自定义掉落必须放行。
-         */
-        if (itemEntity.getPersistentData().getBoolean(CUSTOM_DROP_TAG)) {
-            return;
-        }
-
-        long now = System.currentTimeMillis();
-
-        /*
-         * 清理过期窗口。
-         */
-        directDropSuppressions.entrySet().removeIf(
-                entry -> entry.getValue().expiresAt() < now
-        );
-
-        for (DirectDropSuppression suppression : directDropSuppressions.values()) {
-
-            if (!suppression.dimension().equals(
-                    event.getLevel().dimension()
-            )) {
-                continue;
-            }
-
-            if (suppression.expiresAt() < now) {
-                continue;
-            }
-
-            double dx = itemEntity.getX() - suppression.x();
-            double dy = itemEntity.getY() - suppression.y();
-            double dz = itemEntity.getZ() - suppression.z();
-
-            /*
-             * 只处理 Boss 死亡点附近的直接掉落。
-             *
-             * 注意：这里不删除已有物品，而是直接取消加入世界事件。
-             */
-            if ((dx * dx + dy * dy + dz * dz) <= 9.0D) {
-                event.setCanceled(true);
-
-                NetCraftToolkit.LOGGER.info(
-                        "[NetCraftToolkit] Blocked NetCraft Boss direct drop before insertion: item={}",
-                        BuiltInRegistries.ITEM.getKey(
-                                itemEntity.getItem().getItem()
-                        )
-                );
-                return;
-            }
-        }
+        DropConfig config = dropConfigs.get(entityId);
+        return config != null
+                && !config.entries().isEmpty()
+                && config.replaceDrops();
     }
 
     /**
@@ -496,13 +414,6 @@ public class NetCraftDropManager {
         );
 
         /*
-         * 自定义掉落必须明确标记。
-         * 因为 replace=true 时，后面的 EntityJoinLevelEvent
-         * 会拦截 Boss 原版直接生成的 ItemEntity。
-         */
-        itemEntity.getPersistentData().putBoolean(CUSTOM_DROP_TAG, true);
-
-        /*
          * 给掉落物一点轻微随机运动，
          * 和 Minecraft 正常掉落物表现接近。
          */
@@ -544,19 +455,6 @@ public class NetCraftDropManager {
 
             return null;
         }
-    }
-
-    /**
-     * 一次 Boss 直接掉落拦截窗口。
-     */
-    private record DirectDropSuppression(
-            UUID bossUuid,
-            net.minecraft.resources.ResourceKey<net.minecraft.world.level.Level> dimension,
-            double x,
-            double y,
-            double z,
-            long expiresAt
-    ) {
     }
 
     /**
