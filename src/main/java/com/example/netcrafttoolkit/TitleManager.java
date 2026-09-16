@@ -709,6 +709,54 @@ public class TitleManager {
                 && titles.contains(title);
     }
 
+    /** 根据称号 ID 获取当前显示文本。 */
+    public synchronized String getTitleText(String titleId) {
+        if (titleId == null || titleId.isBlank()) {
+            return null;
+        }
+
+        NetCraftConfig config = NetCraftToolkit.getConfig();
+        if (config != null) {
+            String text = config.getTitleDefinitions().get(titleId);
+            if (text != null) {
+                return text;
+            }
+        }
+
+        String custom = customTitles.get(titleId);
+        if (custom != null) {
+            return custom;
+        }
+
+        // 兼容旧数据：如果存储的是原始文本而不是 ID，则直接返回。
+        return titleId;
+    }
+
+    /** 获取当前全部可用称号定义。 */
+    public synchronized Map<String, String> getDefinitions() {
+        Map<String, String> result = new LinkedHashMap<>();
+        NetCraftConfig config = NetCraftToolkit.getConfig();
+        if (config != null) {
+            result.putAll(config.getTitleDefinitions());
+        }
+        result.putAll(customTitles);
+        return result;
+    }
+
+    /** 配置热重载后刷新在线玩家的聊天名和 Tab 名。 */
+    public synchronized void syncDefinitions(Map<String, String> definitions) {
+        if (definitions == null) {
+            return;
+        }
+
+        if (server != null) {
+            for (ServerPlayer player : server.getPlayerList().getPlayers()) {
+                applyName(player);
+                player.refreshTabListName();
+            }
+        }
+    }
+
     /** 获取玩家当前称号显示文本（主 + 副）。 */
     private synchronized MutableComponent buildTitlePrefix(UUID uuid) {
         MutableComponent result = Component.empty();
@@ -753,6 +801,24 @@ public class TitleManager {
         event.setDisplayname(prefix);
     }
 
+    /** 玩家称号前缀，用于 Tab 列表显示名。 */
+    @SubscribeEvent
+    public void onTabListNameFormat(PlayerEvent.TabListNameFormat event) {
+        if (!(event.getEntity() instanceof ServerPlayer player)) {
+            return;
+        }
+
+        MutableComponent prefix = buildTitlePrefix(player.getUUID());
+        if (prefix.getString().isEmpty()) {
+            event.setDisplayName(null);
+            return;
+        }
+
+        prefix.append(Component.literal(" "));
+        prefix.append(player.getName());
+        event.setDisplayName(prefix);
+    }
+
     /**
      * 刷新玩家名称显示。
      *
@@ -776,15 +842,12 @@ public class TitleManager {
             player.setCustomName(name);
             player.setCustomNameVisible(true);
 
-            // Tab 列表使用同一套称号显示名。
-            MutableComponent tab = prefix.copy();
-            tab.append(Component.literal(" "));
-            tab.append(player.getName());
-            player.setTabListDisplayName(tab);
+            // Tab 列表通过 Forge 的 TabListNameFormat 事件动态提供显示名。
+            player.refreshTabListName();
         } else {
             player.setCustomName(null);
             player.setCustomNameVisible(false);
-            player.setTabListDisplayName(null);
+            player.refreshTabListName();
         }
     }
 
