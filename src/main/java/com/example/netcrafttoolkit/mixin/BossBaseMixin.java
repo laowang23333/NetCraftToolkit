@@ -6,6 +6,7 @@ import net.minecraft.util.RandomSource;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.item.Item;
 import org.spongepowered.asm.mixin.Mixin;
+import org.spongepowered.asm.mixin.Pseudo;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
@@ -16,6 +17,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
  * 不创建 ItemEntity，也不删除已经存在的 ItemEntity。
  * replace=true 时直接在 spawnScatteredStacks() 入口返回。
  */
+@Pseudo
 @Mixin(targets = "com.jiufeng.netcraft.entity.BossBase")
 public abstract class BossBaseMixin {
 
@@ -37,11 +39,13 @@ public abstract class BossBaseMixin {
 
         if (NetCraftToolkit.getDropManager() != null
                 && NetCraftToolkit.getDropManager().shouldBlockScatteredDrops(entity)) {
+
             NetCraftToolkit.LOGGER.info(
                     "[NetCraftToolkit] Mixin blocked NetCraft Boss direct drop: entity={}, item={}",
                     entity.getType().builtInRegistryHolder().key().location(),
                     net.minecraft.core.registries.BuiltInRegistries.ITEM.getKey(item)
             );
+
             ci.cancel();
         }
     }
