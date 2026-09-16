@@ -3,6 +3,7 @@ package com.example.netcrafttoolkit;
 import com.mojang.logging.LogUtils;
 import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.event.server.ServerStartingEvent;
+import net.minecraftforge.event.server.ServerStoppingEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.common.Mod;
 import org.slf4j.Logger;
@@ -14,13 +15,22 @@ public class NetCraftToolkit {
 
     /**
      * 全局日志。
-     *
-     * 设为 public，方便其他管理器输出日志。
      */
     public static final Logger LOGGER = LogUtils.getLogger();
 
+    /**
+     * 配置管理器。
+     */
     private static NetCraftConfig config;
+
+    /**
+     * 生物属性管理器。
+     */
     private static NetCraftAttributeManager attributeManager;
+
+    /**
+     * 掉落管理器。
+     */
     private static NetCraftDropManager dropManager;
 
     public NetCraftToolkit() {
@@ -30,101 +40,174 @@ public class NetCraftToolkit {
         LOGGER.info("========================================");
 
         /*
-         * 创建配置管理器。
+         * 创建三个核心管理器。
          */
         config = new NetCraftConfig();
-
-        /*
-         * 创建生物属性管理器。
-         */
         attributeManager = new NetCraftAttributeManager();
-
-        /*
-         * 创建掉落管理器。
-         */
         dropManager = new NetCraftDropManager();
 
         /*
-         * 注册 Forge 事件。
-         *
-         * Config：
-         * 负责服务器启动以及配置加载。
-         *
-         * AttributeManager：
-         * 负责生物属性。
-         *
-         * DropManager：
-         * 负责自定义掉落。
+         * 注册配置事件。
          */
         MinecraftForge.EVENT_BUS.register(config);
+
+        /*
+         * 注册属性事件。
+         */
         MinecraftForge.EVENT_BUS.register(attributeManager);
+
+        /*
+         * 注册掉落事件。
+         */
         MinecraftForge.EVENT_BUS.register(dropManager);
 
         /*
-         * 注册本类自己的服务器事件。
+         * 注册本类事件。
          */
         MinecraftForge.EVENT_BUS.register(this);
 
-        LOGGER.info("[NetCraftToolkit] Event managers registered.");
-        LOGGER.info("[NetCraftToolkit] Loaded.");
+        LOGGER.info(
+                "[NetCraftToolkit] Managers registered."
+        );
+
+        LOGGER.info(
+                "[NetCraftToolkit] Loaded."
+        );
     }
 
     /**
      * 服务器启动。
      */
     @SubscribeEvent
-    public void onServerStarting(ServerStartingEvent event) {
+    public void onServerStarting(
+            ServerStartingEvent event
+    ) {
 
-        LOGGER.info("[NetCraftToolkit] Server starting...");
+        LOGGER.info(
+                "[NetCraftToolkit] Server starting..."
+        );
 
         if (config == null) {
-            LOGGER.error("[NetCraftToolkit] Config manager is null.");
+
+            LOGGER.error(
+                    "[NetCraftToolkit] Config manager is null."
+            );
+
             return;
         }
 
         /*
-         * 初始化配置管理器。
+         * 初始化配置文件路径。
          */
-        config.init(event.getServer());
+        config.init(
+                event.getServer()
+        );
 
         /*
-         * 加载配置。
+         * 读取配置。
+         *
+         * 如果配置文件不存在，
+         * 会自动生成 NetCraft 生物配置。
          */
         config.load();
 
-        LOGGER.info("[NetCraftToolkit] Configuration loaded.");
+        /*
+         * 启动配置文件监听。
+         *
+         * 修改：
+         *
+         * config/netcrafttoolkit/netcraft-attributes.toml
+         *
+         * 后会自动重新加载。
+         */
+        config.startWatching();
 
         /*
-         * 重新应用已经加载的属性配置。
-         *
-         * 正常服务器启动时实体可能还没有大量生成，
-         * 这里调用一次可以保证已经存在的实体也能被处理。
+         * 服务器已经启动以后，
+         * 重新处理当前已经存在的 NetCraft 生物。
          */
         if (attributeManager != null) {
-            attributeManager.reloadAllEntities(event.getServer());
+
+            attributeManager.reloadAllEntities();
         }
 
-        LOGGER.info("[NetCraftToolkit] Server initialization complete.");
+        LOGGER.info(
+                "[NetCraftToolkit] Configuration loaded."
+        );
+
+        LOGGER.info(
+                "[NetCraftToolkit] Hot reload watcher started."
+        );
+
+        LOGGER.info(
+                "[NetCraftToolkit] Server initialization complete."
+        );
+    }
+
+    /**
+     * 服务器停止。
+     */
+    @SubscribeEvent
+    public void onServerStopping(
+            ServerStoppingEvent event
+    ) {
+
+        LOGGER.info(
+                "[NetCraftToolkit] Server stopping..."
+        );
+
+        /*
+         * 停止配置监听线程。
+         */
+        if (config != null) {
+
+            config.stopWatching();
+        }
+
+        /*
+         * 清理属性管理器缓存。
+         */
+        if (attributeManager != null) {
+
+            attributeManager.clear();
+        }
+
+        /*
+         * 清理掉落配置。
+         */
+        if (dropManager != null) {
+
+            dropManager.clear();
+        }
+
+        LOGGER.info(
+                "[NetCraftToolkit] Shutdown complete."
+        );
     }
 
     /**
      * 获取配置管理器。
      */
     public static NetCraftConfig getConfig() {
+
         return config;
     }
 
     /**
      * 获取属性管理器。
      */
-    public static NetCraftAttributeManager getAttributeManager() {
+    public static NetCraftAttributeManager
+    getAttributeManager() {
+
         return attributeManager;
     }
 
     /**
      * 获取掉落管理器。
      */
-    public static NetCraftDropManager getDropManager() {
+    public static NetCraftDropManager
+    getDropManager() {
+
         return dropManager;
     }
 }
