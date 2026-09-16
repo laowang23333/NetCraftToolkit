@@ -1812,7 +1812,7 @@ public class NetCraftConfig {
         List<String> ids = new ArrayList<>();
 
         for (var entry : ForgeRegistries.ITEMS.getEntries()) {
-            ResourceLocation id = entry.getKey();
+            ResourceLocation id = entry.getKey().location();
 
             if (id == null || !"netcraft".equals(id.getNamespace())) {
                 continue;
