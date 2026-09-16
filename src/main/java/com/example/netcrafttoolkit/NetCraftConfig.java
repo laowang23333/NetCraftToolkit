@@ -94,6 +94,13 @@ public class NetCraftConfig {
             new LinkedHashMap<>();
 
     /**
+     * 配置中的称号定义。
+     * titleId -> 显示文本
+     */
+    private final Map<String, String> titleDefinitions =
+            new LinkedHashMap<>();
+
+    /**
      * 掉落配置。
      *
      * entityId -> DropConfig
@@ -213,6 +220,8 @@ public class NetCraftConfig {
                 generateDefaultConfig();
 
                 generatedInitialConfig = true;
+            } else {
+                ensureTitleSection();
             }
 
             parseConfig();
@@ -328,6 +337,11 @@ public class NetCraftConfig {
                                 attributeManager.reloadAllEntities();
                             }
 
+                            TitleManager titleManager = NetCraftToolkit.getTitleManager();
+                            if (titleManager != null) {
+                                titleManager.syncDefinitions(titleDefinitions);
+                            }
+
                             NetCraftToolkit.LOGGER.info(
                                     "[NetCraftToolkit] Existing NetCraft entities updated after hot reload."
                             );
@@ -364,6 +378,7 @@ public class NetCraftConfig {
         entityAttributes.clear();
         entityCategories.clear();
         entityNames.clear();
+        titleDefinitions.clear();
         dropConfigs.clear();
         equipmentOverrides.clear();
 
@@ -473,7 +488,20 @@ public class NetCraftConfig {
         }
 
         /*
-         * 掉落配置必须先判断。
+         * 称号定义。
+         * [title]
+         * warrior = "§6§l战神"
+         */
+        if (section.equalsIgnoreCase("title")) {
+            String titleText = parseQuotedString(value);
+            if (titleText != null && !titleText.isBlank()) {
+                titleDefinitions.put(key, titleText);
+            }
+            return;
+        }
+
+        /*
+         * 掉落配置必须先判断.
          *
          * [boss."netcraft:xxx".drops] 同时满足 isEntitySection()，
          * 如果先判断普通实体区段，replace/items 就会被当成普通属性，
@@ -525,6 +553,22 @@ public class NetCraftConfig {
         return section.startsWith("boss.")
                 || section.startsWith("elite.")
                 || section.startsWith("mob.");
+    }
+
+    /** 读取双引号字符串，并处理基础 TOML 转义。 */
+    private String parseQuotedString(String value) {
+        if (value == null) {
+            return null;
+        }
+        String text = value.trim();
+        if (text.length() >= 2 && text.startsWith("\"") && text.endsWith("\"")) {
+            text = text.substring(1, text.length() - 1);
+        }
+        return text.replace("\\n", "\n")
+                .replace("\\r", "\r")
+                .replace("\\t", "\t")
+                .replace("\\\"", "\"")
+                .replace("\\\\", "\\");
     }
 
     /**
@@ -1165,9 +1209,54 @@ public class NetCraftConfig {
     }
 
     /**
+     * 兼容已有配置：如果旧配置没有 [title]，就在 BOSS 前补上称号区。
+     */
+    private void ensureTitleSection() throws IOException {
+        if (configFile == null || !Files.exists(configFile)) {
+            return;
+        }
+
+        String text = Files.readString(configFile, StandardCharsets.UTF_8);
+        if (text.contains("[title]")) {
+            return;
+        }
+
+        String titleBlock =
+                "# ================================================================\n" +
+                "# 称号\n" +
+                "# ================================================================\n" +
+                "# 称号ID = 称号显示文本。\n" +
+                "# 支持 §0-§f / §k-§o / &0-&f / &k-&o / &#RRGGBB / &x&R&R&G&G&B&B。\n" +
+                "# 渐变格式：<gradient:#FF0000:#00FFFF>称号</gradient>，可填写多个颜色。\n" +
+                "# 管理指令仅 OP 可用；玩家通过 /mytitle 打开自己的称号 GUI。\n\n" +
+                "[title]\n" +
+                "warrior = \"§6§l战神\"\n" +
+                "gold_king = \"&#FFD700§l黄金王者\"\n" +
+                "rainbow = \"<gradient:#FF0000:#FFFF00:#00FF00:#00FFFF:#0000FF>彩虹之王</gradient>\"\n\n";
+
+        int bossIndex = text.indexOf("# BOSS");
+        if (bossIndex >= 0) {
+            int lineStart = text.lastIndexOf('\n', bossIndex - 1) + 1;
+            text = text.substring(0, lineStart) + titleBlock + text.substring(lineStart);
+        } else {
+            text = titleBlock + text;
+        }
+
+        Files.writeString(
+                configFile,
+                text,
+                StandardCharsets.UTF_8,
+                StandardOpenOption.TRUNCATE_EXISTING,
+                StandardOpenOption.WRITE
+        );
+
+        NetCraftToolkit.LOGGER.info("[NetCraftToolkit] Added missing [title] section to existing config.");
+    }
+
+    /**
      * 生成默认配置。
      *
-     * 只生成 NetCraft 生物。
+     * 只生成 NetCraft 生物.
      *
      * 不会把 Minecraft 原版僵尸、骷髅等写进来。
      */
@@ -1182,6 +1271,19 @@ public class NetCraftConfig {
         out.append("# 自动生成配置文件\n");
         out.append("# Minecraft 1.20.1 / Forge 47.4.13\n");
         out.append("# ============================================================\n\n");
+
+        out.append("# ================================================================\n");
+        out.append("# 称号\n");
+        out.append("# ================================================================\n");
+        out.append("# 称号ID = 称号显示文本。\n");
+        out.append("# 支持 §0-§f / §k-§o / &0-&f / &k-&o / &#RRGGBB / &x&R&R&G&G&B&B。\n");
+        out.append("# 渐变格式：<gradient:#FF0000:#00FFFF>称号</gradient>，可填写多个颜色。\n");
+        out.append("# 管理指令仅 OP 可用；玩家通过 /mytitle 打开自己的称号 GUI。\n\n");
+        out.append("[title]\n");
+        out.append("warrior = \"§6§l战神\"\n");
+        out.append("gold_king = \"&#FFD700§l黄金王者\"\n");
+        out.append("rainbow = \"<gradient:#FF0000:#FFFF00:#00FF00:#00FFFF:#0000FF>彩虹之王</gradient>\"\n");
+        out.append("\n");
 
         out.append("# ================================================================\n");
         out.append("# BOSS\n");
@@ -2259,6 +2361,11 @@ public class NetCraftConfig {
         );
     }
 
+    /** 获取 [title] 中定义的全部称号。 */
+    public synchronized Map<String, String> getTitleDefinitions() {
+        return new LinkedHashMap<>(titleDefinitions);
+    }
+
     /**
      * 清空配置。
      */
@@ -2266,6 +2373,7 @@ public class NetCraftConfig {
         entityAttributes.clear();
         entityCategories.clear();
         entityNames.clear();
+        titleDefinitions.clear();
         dropConfigs.clear();
         equipmentOverrides.clear();
 
