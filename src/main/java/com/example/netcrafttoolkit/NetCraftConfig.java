@@ -1,6 +1,7 @@
 package com.example.netcrafttoolkit;
 
 import net.minecraft.server.MinecraftServer;
+import net.minecraft.world.level.storage.LevelResource;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.ai.attributes.Attribute;
@@ -31,7 +32,7 @@ import java.util.concurrent.TimeUnit;
  *
  * 功能：
  * 1. 自动扫描 NetCraft 生物。
- * 2. 自动生成 netcrafttoolkit.toml。
+ * 2. 自动生成 world/serverconfig/netcrafttoolkit.toml。
  * 3. 读取 Boss / Elite / Mob 配置。
  * 4. 读取 Minecraft 原生属性修改。
  * 5. 读取 BossBase 的 base_damage / base_defense。
@@ -115,7 +116,63 @@ public class NetCraftConfig {
 
         Path serverDirectory = server.getServerDirectory().toPath();
 
-        this.configFile = serverDirectory.resolve(CONFIG_FILE_NAME);
+        /*
+         * 配置文件改为当前世界专属的 serverconfig。
+         *
+         * world/serverconfig/netcrafttoolkit.toml
+         */
+        Path worldPath = server.getWorldPath(LevelResource.ROOT);
+        Path newConfigFile = worldPath
+                .resolve("serverconfig")
+                .resolve(CONFIG_FILE_NAME);
+
+        /*
+         * 兼容旧版本：
+         * 如果服务器根目录还有旧的 netcrafttoolkit.toml，
+         * 而新的 world/serverconfig 中还没有，就自动迁移。
+         * 不覆盖已经存在的新配置。
+         */
+        Path oldConfigFile = serverDirectory.resolve(CONFIG_FILE_NAME);
+
+        try {
+            if (!Files.exists(newConfigFile)
+                    && Files.exists(oldConfigFile)) {
+
+                Files.createDirectories(newConfigFile.getParent());
+
+                try {
+                    Files.move(
+                            oldConfigFile,
+                            newConfigFile,
+                            StandardCopyOption.REPLACE_EXISTING
+                    );
+                } catch (IOException moveException) {
+                    /*
+                     * 某些服务器面板/文件系统可能不允许跨文件系统移动，
+                     * 这里退回复制，然后删除旧文件。
+                     */
+                    Files.copy(
+                            oldConfigFile,
+                            newConfigFile,
+                            StandardCopyOption.REPLACE_EXISTING
+                    );
+                    Files.deleteIfExists(oldConfigFile);
+                }
+
+                NetCraftToolkit.LOGGER.info(
+                        "[NetCraftToolkit] Migrated config: {} -> {}",
+                        oldConfigFile.toAbsolutePath(),
+                        newConfigFile.toAbsolutePath()
+                );
+            }
+        } catch (IOException e) {
+            NetCraftToolkit.LOGGER.error(
+                    "[NetCraftToolkit] Failed to migrate old config file.",
+                    e
+            );
+        }
+
+        this.configFile = newConfigFile;
 
         NetCraftToolkit.LOGGER.info(
                 "[NetCraftToolkit] Config file: {}",
@@ -452,6 +509,16 @@ public class NetCraftConfig {
             return;
         }
 
+        /*
+         * 只读取拥有可读取标准属性的 NetCraft 生物。
+         *
+         * Boss 技能实体如果没有 DefaultAttributes 数据，
+         * 不进入本工具的属性/掉落配置系统。
+         */
+        if (!isReadableNetCraftEntity(entityId)) {
+            return;
+        }
+
         entityCategories.put(
                 entityId,
                 category
@@ -511,6 +578,13 @@ public class NetCraftConfig {
          * 只允许 NetCraft 生物。
          */
         if (!entityId.startsWith("netcraft:")) {
+            return;
+        }
+
+        /*
+         * 没有标准属性数据的技能/Boss 实体不读取掉落配置。
+         */
+        if (!isReadableNetCraftEntity(entityId)) {
             return;
         }
 
@@ -1153,6 +1227,15 @@ public class NetCraftConfig {
             }
 
             /*
+             * 只生成拥有标准属性数据的实体。
+             * 没有 DefaultAttributes 的 Boss 技能实体直接跳过，
+             * 不生成空的属性配置和 drops 配置。
+             */
+            if (!hasReadableStandardAttributes(type)) {
+                continue;
+            }
+
+            /*
              * 尝试判断分类。
              */
             String detectedCategory =
@@ -1230,6 +1313,56 @@ public class NetCraftConfig {
     }
 
     /**
+     * 判断实体是否拥有可读取的标准属性数据。
+     *
+     * 没有 DefaultAttributes 的实体通常是纯技能/特效实体，
+     * 这类实体不应该进入 NetCraft Toolkit 的属性和掉落配置。
+     */
+    private boolean hasReadableStandardAttributes(
+            EntityType<?> type
+    ) {
+        if (type == null) {
+            return false;
+        }
+
+        try {
+            return DefaultAttributes.hasSupplier(type);
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    /**
+     * 根据注册名判断该 NetCraft 生物是否拥有可读取的标准属性。
+     */
+    private boolean isReadableNetCraftEntity(
+            String entityId
+    ) {
+        if (entityId == null
+                || entityId.isBlank()
+                || !entityId.startsWith("netcraft:")) {
+            return false;
+        }
+
+        try {
+            ResourceLocation id = ResourceLocation.tryParse(entityId);
+
+            if (id == null
+                    || !"netcraft".equals(id.getNamespace())) {
+                return false;
+            }
+
+            EntityType<?> type =
+                    ForgeRegistries.ENTITY_TYPES.getValue(id);
+
+            return hasReadableStandardAttributes(type);
+
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    /**
      * 写入一个生物的属性。
      */
     private void writeEntityAttributes(
@@ -1251,7 +1384,6 @@ public class NetCraftConfig {
             }
 
             if (supplier == null) {
-                writeDefaultUnknownAttributes(out);
                 return;
             }
 
@@ -1317,7 +1449,7 @@ public class NetCraftConfig {
                     e
             );
 
-            writeDefaultUnknownAttributes(out);
+            return;
         }
 
         /*
@@ -1373,15 +1505,6 @@ public class NetCraftConfig {
              * 该实体没有这个属性时不输出。
              */
         }
-    }
-
-    /**
-     * 没有原生属性时的占位。
-     */
-    private void writeDefaultUnknownAttributes(
-            StringBuilder out
-    ) {
-        out.append("# 该实体没有可读取的标准属性数据。\n");
     }
 
     /**
