@@ -33,6 +33,11 @@ public class NetCraftToolkit {
      */
     private static NetCraftDropManager dropManager;
 
+    /**
+     * 称号管理器。
+     */
+    private static TitleManager titleManager;
+
     public NetCraftToolkit() {
 
         LOGGER.info("========================================");
@@ -45,6 +50,7 @@ public class NetCraftToolkit {
         config = new NetCraftConfig();
         attributeManager = new NetCraftAttributeManager();
         dropManager = new NetCraftDropManager();
+        titleManager = new TitleManager();
 
         /*
          * 注册炉石菜单自定义网络包。
@@ -65,6 +71,11 @@ public class NetCraftToolkit {
          * 注册掉落事件。
          */
         MinecraftForge.EVENT_BUS.register(dropManager);
+
+        /*
+         * 注册称号事件。
+         */
+        MinecraftForge.EVENT_BUS.register(titleManager);
 
         /*
          * 注册本类事件。
@@ -115,6 +126,13 @@ public class NetCraftToolkit {
          * 会自动生成 NetCraft 生物配置。
          */
         config.load();
+
+        /*
+         * 初始化称号管理器。
+         */
+        if (titleManager != null) {
+            titleManager.init(event.getServer());
+        }
 
         /*
          * 启动配置文件监听。
@@ -185,6 +203,13 @@ public class NetCraftToolkit {
             dropManager.clear();
         }
 
+        /*
+         * 保存称号数据。
+         */
+        if (titleManager != null) {
+            titleManager.save();
+        }
+
         LOGGER.info(
                 "[NetCraftToolkit] Shutdown complete."
         );
@@ -214,5 +239,13 @@ public class NetCraftToolkit {
     getDropManager() {
 
         return dropManager;
+    }
+
+    /**
+     * 获取称号管理器。
+     */
+    public static TitleManager getTitleManager() {
+
+        return titleManager;
     }
 }
