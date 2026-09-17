@@ -12,14 +12,17 @@ import net.minecraftforge.eventbus.api.SubscribeEvent;
  *
  * Mohist 服务器聊天称号适配。
  *
- * 作用：
- * 1. 单机环境原有 TitleManager 聊天显示不受影响。
- * 2. Mohist 服务器中，绕过 Bukkit/Mohist 默认的聊天名字格式。
- * 3. 有称号的玩家聊天时显示：
+ * 用于解决：
  *
- *    <称号 玩家名> 消息
+ * 单机：
+ *     <称号 玩家名> 消息
  *
- * 4. 没有称号的玩家继续使用服务器原本的聊天系统。
+ * 正常。
+ *
+ * Mohist 服务器：
+ *     <玩家名> 消息
+ *
+ * 不显示称号的问题。
  */
 public class TitleChatEvents {
 
@@ -30,14 +33,11 @@ public class TitleChatEvents {
     }
 
     /**
-     * 处理服务器聊天。
-     *
-     * Mohist 的聊天流程可能不会采用 Forge
-     * PlayerEvent.NameFormat 设置的 displayName，
-     * 因此这里单独处理有称号玩家的聊天。
+     * 服务器聊天事件。
      */
     @SubscribeEvent
     public void onServerChat(ServerChatEvent event) {
+
         if (event == null) {
             return;
         }
@@ -53,88 +53,141 @@ public class TitleChatEvents {
         }
 
         /*
-         * 取得当前玩家的称号前缀。
-         *
-         * buildTitlePrefix() 已经负责：
-         * - 主称号
-         * - 副称号
-         * - 称号颜色
-         * - 自定义称号
-         * - 称号文本解析
+         * 当前玩家 UUID。
          */
-        MutableComponent titlePrefix =
-                titleManager.buildTitlePrefix(player.getUUID());
+        java.util.UUID uuid = player.getUUID();
 
         /*
-         * 没有称号：
-         *
-         * 不取消事件。
-         * 让 Mohist 原本的聊天系统继续处理。
+         * 获取主称号。
          */
-        if (titlePrefix == null || titlePrefix.getString().isBlank()) {
+        String mainTitle = titleManager.getMainTitle(uuid);
+
+        /*
+         * 获取副称号。
+         */
+        String subTitle = titleManager.getSubTitle(uuid);
+
+        /*
+         * 没有主称号，也没有副称号。
+         *
+         * 不接管聊天，让 Mohist 原本的聊天系统处理。
+         */
+        if ((mainTitle == null || mainTitle.isBlank())
+                && (subTitle == null || subTitle.isBlank())) {
+
             return;
         }
 
         /*
-         * 有称号：
+         * 创建聊天前缀。
          *
-         * 我们接管这一次聊天。
+         * 注意：
          *
-         * 如果只调用 event.setMessage()，
-         * Mohist 仍然可能使用：
+         * getMainTitle() / getSubTitle()
+         * 返回的是称号 ID，
+         * 不是最终显示文本。
          *
-         * <wuyutianming> 1
+         * 所以必须经过 getTitleText()
+         * 转换成真正的称号文字。
+         */
+        MutableComponent titlePrefix =
+                Component.empty();
+
+        boolean hasTitle = false;
+
+        /*
+         * 主称号。
+         */
+        if (mainTitle != null && !mainTitle.isBlank()) {
+
+            String titleText =
+                    titleManager.getTitleText(mainTitle);
+
+            if (titleText != null && !titleText.isBlank()) {
+
+                titlePrefix.append(
+                        Component.literal(titleText)
+                );
+
+                hasTitle = true;
+            }
+        }
+
+        /*
+         * 副称号。
+         */
+        if (subTitle != null && !subTitle.isBlank()) {
+
+            String titleText =
+                    titleManager.getTitleText(subTitle);
+
+            if (titleText != null && !titleText.isBlank()) {
+
+                if (hasTitle) {
+                    titlePrefix.append(
+                            Component.literal(" ")
+                    );
+                }
+
+                titlePrefix.append(
+                        Component.literal(titleText)
+                );
+
+                hasTitle = true;
+            }
+        }
+
+        /*
+         * 称号 ID 存在，但是没有解析出有效文本。
          *
-         * 因为 setMessage() 修改的是聊天正文，
-         * 并不能保证 Mohist 的 Bukkit 聊天格式会采用
-         * Forge 的 PlayerEvent.NameFormat。
-         *
-         * 所以这里取消原聊天，再自己广播完整聊天组件。
+         * 继续使用 Mohist 原本聊天。
+         */
+        if (!hasTitle) {
+            return;
+        }
+
+        /*
+         * 接管本次聊天。
          */
         event.setCanceled(true);
 
-        MinecraftServer server = player.getServer();
+        MinecraftServer server =
+                player.getServer();
 
         if (server == null) {
             return;
         }
 
         /*
-         * 最终显示名称：
+         * 构造显示名称：
          *
-         * <称号 玩家名>
+         * 称号 玩家名
          */
         MutableComponent displayName =
                 titlePrefix.copy();
 
-        displayName.append(Component.literal(" "));
-        displayName.append(player.getName());
+        displayName.append(
+                Component.literal(" ")
+        );
 
-        /*
-         * 使用 Minecraft 原版聊天组件：
-         *
-         * <显示名称> 消息
-         *
-         * 这里使用 chat.type.text，
-         * 而不是手动拼接尖括号。
-         *
-         * 好处是：
-         * - 保留 Minecraft 原版聊天格式
-         * - 玩家名称 Component 的样式继续有效
-         * - 称号 Component 的颜色继续有效
-         * - 聊天正文 Component 的格式继续有效
-         */
-        Component chatMessage = Component.translatable(
-                "chat.type.text",
-                displayName,
-                event.getMessage()
+        displayName.append(
+                player.getName()
         );
 
         /*
-         * 广播给服务器在线玩家。
+         * 构造最终聊天：
          *
-         * false：
-         * 不使用 overlay（不会显示在快捷栏上方）。
+         * <称号 玩家名> 消息
+         */
+        Component chatMessage =
+                Component.translatable(
+                        "chat.type.text",
+                        displayName,
+                        event.getMessage()
+                );
+
+        /*
+         * 广播给服务器所有在线玩家。
          */
         server.getPlayerList().broadcastSystemMessage(
                 chatMessage,
