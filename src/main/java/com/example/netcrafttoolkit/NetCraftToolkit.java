@@ -38,6 +38,11 @@ public class NetCraftToolkit {
      */
     private static TitleManager titleManager;
 
+    /**
+     * 称号指令注册器。
+     */
+    private static TitleCommands titleCommands;
+
     public NetCraftToolkit() {
 
         LOGGER.info("========================================");
@@ -51,6 +56,7 @@ public class NetCraftToolkit {
         attributeManager = new NetCraftAttributeManager();
         dropManager = new NetCraftDropManager();
         titleManager = new TitleManager();
+        titleCommands = new TitleCommands(titleManager);
 
         /*
          * 注册炉石菜单自定义网络包。
@@ -76,6 +82,11 @@ public class NetCraftToolkit {
          * 注册称号事件。
          */
         MinecraftForge.EVENT_BUS.register(titleManager);
+
+        /*
+         * 注册称号指令。
+         */
+        MinecraftForge.EVENT_BUS.register(titleCommands);
 
         /*
          * 注册本类事件。
