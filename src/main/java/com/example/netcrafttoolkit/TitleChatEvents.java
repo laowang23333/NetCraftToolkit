@@ -14,47 +14,17 @@ import java.util.regex.Pattern;
 
 /**
 
-* NetCraftToolkit
+* NetCraftToolkit 聊天称号适配。
 
 * 
 
-* Mohist 服务器聊天称号适配。
+* Mohist 1.20.1 下使用 Bukkit AsyncPlayerChatEvent
+
+* 接管最终聊天格式。
 
 * 
 
-* 聊天链路：
-
-* 
-
-* Mohist
-
-* ↓
-
-* Bukkit AsyncPlayerChatEvent
-
-* ↓
-
-* HIGHEST
-
-* ↓
-
-* NetCraftToolkit
-
-* ↓
-
-* TitleManager 获取称号
-
-* ↓
-
-* 转换颜色 / 渐变
-
-* ↓
-
-* AsyncPlayerChatEvent.setFormat()
-
-* 
-
-* 最终：
+* 最终格式：
 
 * 
 
@@ -64,44 +34,40 @@ import java.util.regex.Pattern;
 
 * 支持：
 
-* 
+* "gradient:#RRGGBB:#RRGGBB" (gradient:#RRGGBB:#RRGGBB)文字</gradient>
 
-* 1. 普通文字
+* &#RRGGBB
 
-* 2. §0-§f
+* &x&R&R&G&G&B&B
 
-* 3. &0-&f
+* &a ~ &f
 
-* 4. &#RRGGBB
+* &k ~ &o
 
-* 5. &x&R&R&G&G&B&B
-
-* 6. §x§R§R§G§G§B§B
-
-* 7. "gradient:#RRGGBB:#RRGGBB" (gradient:#RRGGBB:#RRGGBB)文字</gradient>
-     */
-     public class TitleChatEvents {
+* &r
+  */
+  public class TitleChatEvents {
   
   private final TitleManager titleManager;
   
   /**
   
-  * 防止服务器启动阶段重复注册。
+  * 防止重复注册 Bukkit 聊天事件。
     */
     private volatile boolean bukkitChatHooked = false;
   
   /**
   
-  * 保存动态代理对象，避免被垃圾回收。
+  * 保存动态代理引用。
     */
     private Object bukkitListenerProxy;
     private Object bukkitExecutorProxy;
   
   /**
   
-  * 渐变格式：
+  * "gradient:#RRGGBB:#RRGGBB" (gradient:#RRGGBB:#RRGGBB)文字</gradient>
   * 
-  * "gradient:#0047FF:#00FFFF:#FFFFFF" (gradient:#0047FF:#00FFFF:#FFFFFF)文字</gradient>
+  * 支持多个颜色节点。
     /
     private static final Pattern GRADIENT_PATTERN =
     Pattern.compile(
@@ -117,7 +83,7 @@ import java.util.regex.Pattern;
   
   /**
   
-  * 第一次尝试挂接 Bukkit 聊天。
+  * Forge 服务器启动阶段尝试注册 Bukkit 聊天事件。
     */
     @SubscribeEvent
     public void onServerStarting(
@@ -129,9 +95,6 @@ import java.util.regex.Pattern;
   /**
   
   * ServerStartedEvent 再尝试一次。
-  * 
-  * 某些 Mohist 版本在 ServerStartingEvent 时
-  * Bukkit 环境还没有完全初始化。
     */
     @SubscribeEvent
     public void onServerStarted(
@@ -146,9 +109,7 @@ import java.util.regex.Pattern;
   
   * 
   
-  * 不直接引用 Bukkit API，
-  
-  * 避免 Forge 开发环境因为没有 Bukkit 依赖而无法编译。
+  * 不直接引用 Bukkit API。
     */
     private synchronized void tryHookBukkitChat() {
     
@@ -199,7 +160,7 @@ import java.util.regex.Pattern;
          );
 
  /*
-  * 获取 Bukkit PluginManager。
+  * Bukkit PluginManager。
   */
  Object pluginManager =
          bukkitClass
@@ -209,10 +170,10 @@ import java.util.regex.Pattern;
                  .invoke(null);
 
  /*
-  * Forge Mod 不是 Bukkit Plugin。
+  * Forge Mod 本身不是 Bukkit Plugin。
   *
-  * 因此需要借用一个已经启用的 Bukkit Plugin
-  * 作为 Event 注册所有者。
+  * 借用一个已经启用的 Bukkit Plugin
+  * 作为事件注册 owner。
   */
  Object plugin =
          findEnabledPlugin(
@@ -231,9 +192,7 @@ import java.util.regex.Pattern;
  }
 
  /*
-  * HIGHEST：
-  *
-  * 尽量排在其他普通聊天格式化器后面。
+  * HIGHEST。
   */
  Object highest =
          Enum.valueOf(
@@ -248,7 +207,9 @@ import java.util.regex.Pattern;
   */
  InvocationHandler listenerHandler =
          (proxy, method, args) ->
-                 defaultProxyReturn(method);
+                 defaultProxyReturn(
+                         method
+                 );
 
  /*
   * Bukkit EventExecutor 动态代理。
@@ -275,22 +236,22 @@ import java.util.regex.Pattern;
              );
          };
 
- ClassLoader bukkitClassLoader =
+ ClassLoader classLoader =
          listenerClass.getClassLoader();
 
- if (bukkitClassLoader == null) {
+ if (classLoader == null) {
 
-     bukkitClassLoader =
+     classLoader =
              TitleChatEvents.class
                      .getClassLoader();
  }
 
  /*
-  * 创建 Listener。
+  * 创建 Bukkit Listener。
   */
  bukkitListenerProxy =
          Proxy.newProxyInstance(
-                 bukkitClassLoader,
+                 classLoader,
                  new Class<?>[]{
                          listenerClass
                  },
@@ -302,7 +263,7 @@ import java.util.regex.Pattern;
   */
  bukkitExecutorProxy =
          Proxy.newProxyInstance(
-                 bukkitClassLoader,
+                 classLoader,
                  new Class<?>[]{
                          eventExecutorClass
                  },
@@ -310,15 +271,13 @@ import java.util.regex.Pattern;
          );
 
  /*
-  * 获取 Bukkit：
-  *
   * registerEvent(
-  *     Event.class,
+  *     Event,
   *     Listener,
   *     EventPriority,
   *     EventExecutor,
   *     Plugin,
-  *     boolean
+  *     ignoreCancelled
   * )
   */
  Method registerEvent =
@@ -333,12 +292,9 @@ import java.util.regex.Pattern;
          );
 
  /*
-  * 注册 AsyncPlayerChatEvent。
+  * 注册聊天事件。
   *
   * ignoreCancelled = false
-  *
-  * 即使其他插件取消聊天事件，
-  * 我们仍然可以收到事件。
   */
  registerEvent.invoke(
          pluginManager,
@@ -358,7 +314,9 @@ import java.util.regex.Pattern;
                          .getMethod(
                                  "getName"
                          )
-                         .invoke(plugin)
+                         .invoke(
+                                 plugin
+                         )
          );
 
  NetCraftToolkit.LOGGER.info(
@@ -378,7 +336,7 @@ import java.util.regex.Pattern;
   
   /**
   
-  * 找一个已经启用的 Bukkit Plugin。
+  * 找到一个已经启用的 Bukkit Plugin。
     */
     private Object findEnabledPlugin(
     Object pluginManager,
@@ -408,7 +366,9 @@ Class<?> pluginClass
     plugins
     );
     
-    for (int i = 0; i < length; i++) {
+    for (int i = 0;
+    i < length;
+    i++) {
     
      Object plugin =
          Array.get(
@@ -443,10 +403,9 @@ Class<?> pluginClass
      }
 
  } catch (Throwable ignored) {
-
      /*
-      * 当前 Plugin 获取失败，
-      * 继续尝试下一个。
+      * 当前插件读取失败，
+      * 继续寻找其他插件。
       */
  }
     
@@ -457,7 +416,7 @@ Class<?> pluginClass
   
   /**
   
-  * Bukkit AsyncPlayerChatEvent。
+  * 处理 Bukkit AsyncPlayerChatEvent。
     */
     private void handleBukkitChat(
     Object event
@@ -484,7 +443,7 @@ Class<?> pluginClass
  }
 
  /*
-  * 获取玩家 UUID。
+  * 获取 UUID。
   */
  UUID uuid =
          (UUID)
@@ -504,7 +463,7 @@ Class<?> pluginClass
  }
 
  /*
-  * 获取主称号 ID。
+  * 主称号 ID。
   */
  String mainTitle =
          titleManager.getMainTitle(
@@ -512,7 +471,7 @@ Class<?> pluginClass
          );
 
  /*
-  * 获取副称号 ID。
+  * 副称号 ID。
   */
  String subTitle =
          titleManager.getSubTitle(
@@ -520,9 +479,9 @@ Class<?> pluginClass
          );
 
  /*
-  * 没有称号：
+  * 没有主、副称号。
   *
-  * 完全不修改原聊天。
+  * 不修改原聊天。
   */
  if ((mainTitle == null
          || mainTitle.isBlank())
@@ -548,17 +507,18 @@ Class<?> pluginClass
          subTitle
  );
 
- /*
-  * 称号 ID 存在，
-  * 但最终没有有效文本。
-  */
  if (title.length() == 0) {
      return;
  }
 
  /*
-  * 把称号格式转换成 Bukkit 可以识别的
-  * § 颜色格式。
+  * 转换：
+  *
+  * <gradient:...>
+  *
+  * →
+  *
+  * §x§R§R§G§G§B§B
   */
  String legacyTitle =
          convertToLegacy(
@@ -566,10 +526,10 @@ Class<?> pluginClass
          );
 
  /*
-  * Bukkit 的 String.format()
-  * 会把 % 当成格式占位符。
+  * Bukkit 使用 String.format。
   *
-  * 所以称号里的 % 必须变成 %%。
+  * 所以称号文本里的 %
+  * 必须转成 %%。
   */
  legacyTitle =
          legacyTitle.replace(
@@ -578,7 +538,7 @@ Class<?> pluginClass
          );
 
  /*
-  * 最终格式：
+  * 最终：
   *
   * <称号 玩家名> 消息
   *
@@ -620,13 +580,7 @@ Class<?> pluginClass
   
   /**
   
-  * 添加称号。
-  
-  * 
-  
-  * getMainTitle / getSubTitle 返回的是称号 ID，
-  
-  * getTitleText 才返回实际显示文本。
+  * 根据称号 ID 获取真正显示文本。
     */
     private void appendTitle(
     StringBuilder result,
@@ -661,33 +615,7 @@ Class<?> pluginClass
   
   /**
   
-  * 将 TitleManager 的称号文本
-  
-  * 转换为 Bukkit 聊天能够识别的颜色格式。
-  
-  * 
-  
-  * 支持：
-  
-  * 
-  
-  * "gradient:#RRGGBB:#RRGGBB" (gradient:#RRGGBB:#RRGGBB)文字</gradient>
-  
-  * &#RRGGBB
-  
-  * &x&R&R&G&G&B&B
-  
-  * §x§R§R§G§G§B§B
-  
-  * &0-&f
-  
-  * §0-§f
-  
-  * &k-&o
-  
-  * §k-§o
-  
-  * &r / §r
+  * 转换称号格式。
     */
     private String convertToLegacy(
     String input
@@ -702,7 +630,7 @@ Class<?> pluginClass
     
     /*
     
-    * 先处理渐变。
+    * 先转换 "gradient:..." (gradient:...)。
       */
       String result =
       convertGradients(
@@ -713,21 +641,20 @@ Class<?> pluginClass
     
     * &x&R&R&G&G&B&B
     * 
-    * 转换成：
+    * →
     * 
     * §x§R§R§G§G§B§B
       */
       result =
-      result.replace(
-      "&x&",
-      "§x§"
+      convertAmpersandX(
+      result
       );
     
     /*
     
     * &#RRGGBB
     * 
-    * 转换成：
+    * →
     * 
     * §x§R§R§G§G§B§B
       */
@@ -738,9 +665,7 @@ Class<?> pluginClass
     
     /*
     
-    * 其他 & 颜色代码。
-    * 
-    * Bukkit 可以直接识别 §。
+    * &a / &b / &l / &r 等。
       */
       result =
       convertAmpersandCodes(
@@ -752,19 +677,11 @@ Class<?> pluginClass
   
   /**
   
-  * 处理：
+  * 转换：
   
   * 
   
   * "gradient:#RRGGBB:#RRGGBB" (gradient:#RRGGBB:#RRGGBB)文字</gradient>
-  
-  * 
-  
-  * 生成：
-  
-  * 
-  
-  * §x§R§R§G§G§B§B文...
     */
     private String convertGradients(
     String input
@@ -907,19 +824,7 @@ Class<?> pluginClass
   
   /**
   
-  * 生成渐变的 §x 十六进制颜色。
-  
-  * 
-  
-  * 例如：
-  
-  * 
-  
-  * §x§0§0§4§7§F§F雾
-  
-  * §x§0§0§C§0§F§F雨
-  
-  * ...
+  * 创建渐变颜色。
     */
     private String createGradientLegacy(
     String text,
@@ -937,16 +842,11 @@ Class<?> pluginClass
     return text;
     }
     
-    /*
-    
-    * 按 Unicode code point 计算，
-    * 避免中文/特殊字符被 UTF-16 surrogate 拆开。
-      */
-      int length =
-      text.codePointCount(
-      0,
-      text.length()
-      );
+    int length =
+    text.codePointCount(
+    0,
+    text.length()
+    );
     
     if (length <= 0) {
     return "";
@@ -973,9 +873,7 @@ Class<?> pluginClass
          );
 
  /*
-  * 与 TitleManager 的渐变算法保持一致：
-  *
-  * 字符中心位置取样。
+  * 当前字符在渐变中的位置。
   */
  double position =
          (index + 0.5D)
@@ -993,6 +891,9 @@ Class<?> pluginClass
                  )
          );
 
+ /*
+  * 映射到颜色节点。
+  */
  double scaled =
          position
                  * (colors.length - 1);
@@ -1051,7 +952,7 @@ Class<?> pluginClass
   
   /**
   
-  * 两个 RGB 颜色插值。
+  * RGB 颜色插值。
     */
     private int interpolateColor(
     int color1,
@@ -1121,7 +1022,7 @@ Class<?> pluginClass
   
   /**
   
-  * RGB → Minecraft §x 格式。
+  * RGB 转 Minecraft §x 格式。
   
   * 
   
@@ -1170,15 +1071,104 @@ Class<?> pluginClass
   
   /**
   
-  * &#RRGGBB
+  * 转换：
   
   * 
   
-  * 转：
+  * &x&R&R&G&G&B&B
+  
+  * 
+  
+  * →
   
   * 
   
   * §x§R§R§G§G§B§B
+    */
+    private String convertAmpersandX(
+    String input
+    ) {
+    
+    StringBuilder result =
+    new StringBuilder();
+    
+    for (int i = 0;
+    i < input.length();) {
+    
+     if (i + 13 < input.length()
+         && input.charAt(i) == '&'
+         && Character.toLowerCase(
+         input.charAt(i + 1)
+ ) == 'x') {
+
+     StringBuilder hex =
+             new StringBuilder();
+
+     boolean valid = true;
+
+     int position =
+             i + 2;
+
+     for (int j = 0; j < 6; j++) {
+
+         if (position + 1 >= input.length()
+                 || input.charAt(position) != '&') {
+
+             valid = false;
+             break;
+         }
+
+         char value =
+                 input.charAt(
+                         position + 1
+                 );
+
+         if (!isHexChar(value)) {
+
+             valid = false;
+             break;
+         }
+
+         hex.append(value);
+
+         position += 2;
+     }
+
+     if (valid
+             && hex.length() == 6) {
+
+         result.append(
+                 toMinecraftHex(
+                         Integer.parseInt(
+                                 hex.toString(),
+                                 16
+                         )
+                 )
+         );
+
+         i = position;
+         continue;
+     }
+ }
+
+ result.append(
+         input.charAt(i)
+ );
+
+ i++;
+    
+    }
+    
+    return result.toString();
+    }
+  
+  /**
+  
+  * 转换：
+  
+  * 
+  
+  * &#RRGGBB
     */
     private String convertAmpersandHex(
     String input
@@ -1190,8 +1180,8 @@ Class<?> pluginClass
     for (int i = 0;
     i < input.length();) {
     
-     if (input.charAt(i) == '&'
-         && i + 7 < input.length()
+     if (i + 7 < input.length()
+         && input.charAt(i) == '&'
          && input.charAt(i + 1) == '#') {
 
      String hex =
@@ -1229,9 +1219,17 @@ Class<?> pluginClass
   
   /**
   
-  * &a / &b / &l / &r 等
+  * 转换：
   
-  * 转成 §a / §b / §l / §r。
+  * 
+  
+  * &a
+  
+  * &b
+  
+  * &l
+  
+  * &r
     */
     private String convertAmpersandCodes(
     String input
@@ -1257,6 +1255,7 @@ Class<?> pluginClass
      if (isLegacyCode(code)) {
 
          result.append('§');
+
          result.append(
                  Character.toLowerCase(
                          code
@@ -1269,6 +1268,7 @@ Class<?> pluginClass
  }
 
  result.append(c);
+
  i++;
     
     }
@@ -1278,7 +1278,7 @@ Class<?> pluginClass
   
   /**
   
-  * 判断 Minecraft legacy code。
+  * Minecraft Legacy Code。
     */
     private boolean isLegacyCode(
     char code
@@ -1297,7 +1297,7 @@ Class<?> pluginClass
   
   /**
   
-  * 判断十六进制字符。
+  * 判断十六进制字符串。
     */
     private boolean isHex(
     String value
@@ -1314,21 +1314,29 @@ Class<?> pluginClass
     i < value.length();
     i++) {
     
-     char c =
-         value.charAt(i);
+     if (!isHexChar(
+         value.charAt(i)
+ )) {
 
- boolean valid =
-         (c >= '0' && c <= '9')
-                 || (c >= 'a' && c <= 'f')
-                 || (c >= 'A' && c <= 'F');
-
- if (!valid) {
      return false;
  }
     
     }
     
     return true;
+    }
+  
+  /**
+  
+  * 判断单个十六进制字符。
+    */
+    private boolean isHexChar(
+    char c
+    ) {
+    
+    return (c >= '0' && c <= '9')
+    || (c >= 'a' && c <= 'f')
+    || (c >= 'A' && c <= 'F');
     }
   
   /**
