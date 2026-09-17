@@ -11,11 +11,13 @@ import net.minecraft.world.inventory.Slot;
 /**
  * 玩家称号 GUI。
  *
- * 这版只处理两个实际问题：
- * 1. “物品栏”标题下移一点。
- * 2. 点击/悬停使用 Minecraft 已经计算好的实际 Slot。
+ * 1. 物品栏文字稍微下移。
+ * 2. 背景严格按 3 排 ChestMenu 裁剪。
+ * 3. 点击直接按实际 Slot 坐标处理并发送 TitleActionPacket。
+ * 4. 悬停直接按实际 Slot 坐标绘制 ItemStack tooltip。
  *
- * 不再自己用屏幕坐标换算，避免 FCL/Android GUI 缩放导致点击偏移。
+ * 注意：这里不使用 AbstractContainerScreen.isHovering(Slot,...)
+ * 因为 Forge 1.20.1 该方法的签名不是 Slot 版本。
  */
 public class TitleScreen extends AbstractContainerScreen<TitleMenu> {
 
@@ -44,8 +46,8 @@ public class TitleScreen extends AbstractContainerScreen<TitleMenu> {
         this.imageWidth = 176;
         this.imageHeight = 168;
 
-        // 只下移“物品栏”文字，其他 GUI 坐标不动。
-        this.inventoryLabelY = 73;
+        // “物品栏”下移一点。
+        this.inventoryLabelY = 70;
 
         this.titleLabelX = 8;
         this.titleLabelY = 6;
@@ -67,7 +69,7 @@ public class TitleScreen extends AbstractContainerScreen<TitleMenu> {
                 1.0F
         );
 
-        // 3 排箱子区域。
+        // 只绘制 3 排箱子区域。
         graphics.blit(
                 CHEST_TEXTURE,
                 leftPos,
@@ -80,7 +82,7 @@ public class TitleScreen extends AbstractContainerScreen<TitleMenu> {
                 256
         );
 
-        // 玩家物品栏 + 快捷栏区域。
+        // 接上玩家背包区域。
         graphics.blit(
                 CHEST_TEXTURE,
                 leftPos,
@@ -94,13 +96,6 @@ public class TitleScreen extends AbstractContainerScreen<TitleMenu> {
         );
     }
 
-    /**
-     * 强制补绘 Slot 提示。
-     *
-     * 正常情况下 AbstractContainerScreen 会自己绘制 tooltip。
-     * 这里再明确绘制一次称号槽提示，确保 FCL/Android 环境下
-     * 鼠标/触摸悬停时仍然能看到称号名称。
-     */
     @Override
     public void render(
             GuiGraphics graphics,
@@ -115,72 +110,65 @@ public class TitleScreen extends AbstractContainerScreen<TitleMenu> {
                 partialTick
         );
 
-        Slot hovered = null;
-
+        /*
+         * AbstractContainerScreen 的通用 tooltip 在部分 FCL
+         * 环境下没有稳定命中我们的自定义 LockedSlot。
+         * 这里使用实际 Slot 的 x/y 坐标补绘称号物品 tooltip。
+         */
         for (Slot slot : menu.slots) {
-            if (isActionSlot(slot.index)
-                    && isHovering(slot, mouseX, mouseY)
-                    && slot.hasItem()) {
-                hovered = slot;
+            if (!isActionSlot(slot.index) || !slot.hasItem()) {
+                continue;
+            }
+
+            if (isInsideSlot(slot, mouseX, mouseY)) {
+                graphics.renderTooltip(
+                        this.font,
+                        slot.getItem(),
+                        mouseX,
+                        mouseY
+                );
                 break;
             }
         }
-
-        if (hovered != null) {
-            graphics.renderTooltip(
-                    this.font,
-                    hovered.getItem(),
-                    mouseX,
-                    mouseY
-            );
-        }
     }
 
-    /**
-     * 直接使用 AbstractContainerScreen 的实际 Slot 命中检测。
-     *
-     * 不使用 mouseX/mouseY + leftPos/topPos 自己计算，
-     * 因此 GUI 缩放不会让点击位置和 Slot 错位。
-     */
     @Override
     public boolean mouseClicked(
             double mouseX,
             double mouseY,
             int button
     ) {
-        if (button != 0 && button != 1) {
-            return super.mouseClicked(
-                    mouseX,
-                    mouseY,
-                    button
-            );
-        }
+        if (button == 0 || button == 1) {
+            for (Slot slot : menu.slots) {
+                if (!isActionSlot(slot.index)) {
+                    continue;
+                }
 
-        for (Slot slot : menu.slots) {
-            if (!isActionSlot(slot.index)) {
-                continue;
+                if (!isInsideSlot(slot, mouseX, mouseY)) {
+                    continue;
+                }
+
+                NetCraftToolkit.LOGGER.info(
+                        "[NetCraftToolkit] 客户端称号点击: slot={}, button={}, hasItem={}",
+                        slot.index,
+                        button,
+                        slot.hasItem()
+                );
+
+                /*
+                 * 这里直接发送服务端操作包。
+                 * 不调用 super.mouseClicked，避免原版容器把称号物品
+                 * 当普通物品进行拿取/交换。
+                 */
+                ModNetwork.sendToServer(
+                        new TitleActionPacket(
+                                slot.index,
+                                button == 1
+                        )
+                );
+
+                return true;
             }
-
-            if (!isHovering(slot, mouseX, mouseY)) {
-                continue;
-            }
-
-            NetCraftToolkit.LOGGER.info(
-                    "[NetCraftToolkit] 客户端称号点击: slot={}, button={}, hasItem={}",
-                    slot.index,
-                    button,
-                    slot.hasItem()
-            );
-
-            ModNetwork.sendToServer(
-                    new TitleActionPacket(
-                            slot.index,
-                            button == 1
-                    )
-            );
-
-            // 明确消费这个点击，不让原版物品搬运流程继续。
-            return true;
         }
 
         return super.mouseClicked(
@@ -188,6 +176,20 @@ public class TitleScreen extends AbstractContainerScreen<TitleMenu> {
                 mouseY,
                 button
         );
+    }
+
+    private boolean isInsideSlot(
+            Slot slot,
+            double mouseX,
+            double mouseY
+    ) {
+        double x = leftPos + slot.x;
+        double y = topPos + slot.y;
+
+        return mouseX >= x
+                && mouseX < x + 16
+                && mouseY >= y
+                && mouseY < y + 16;
     }
 
     private static boolean isActionSlot(int slotId) {
