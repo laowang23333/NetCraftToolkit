@@ -24,6 +24,13 @@ public class ModNetwork {
                 SuicidePacket::decode,
                 SuicidePacket::handle
         );
+        CHANNEL.registerMessage(
+                id++,
+                TitleActionPacket.class,
+                TitleActionPacket::encode,
+                TitleActionPacket::decode,
+                TitleActionPacket::handle
+        );
     }
 
     public static void sendToServer(Object packet) {

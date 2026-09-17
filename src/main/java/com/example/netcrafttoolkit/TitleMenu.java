@@ -338,6 +338,56 @@ public class TitleMenu extends ChestMenu {
     }
 
     /**
+     * 由客户端自定义 GUI 点击包调用的服务端称号操作。
+     */
+    public void handleTitleAction(int slotId, boolean rightClick) {
+        if (!(player instanceof ServerPlayer)) {
+            return;
+        }
+
+        if (manager == null) {
+            return;
+        }
+
+        if (slotId >= FIRST_TITLE_SLOT && slotId <= LAST_TITLE_SLOT) {
+            int index = slotId - FIRST_TITLE_SLOT;
+            if (index < 0 || index >= slotTitleIds.size()) {
+                return;
+            }
+
+            String id = slotTitleIds.get(index);
+            boolean changed = rightClick
+                    ? manager.setSubTitle(player.getUUID(), id)
+                    : manager.setMainTitle(player.getUUID(), id);
+
+            if (changed) {
+                player.sendSystemMessage(
+                        Component.literal(rightClick ? "已设置副称号：" : "已设置主称号：")
+                                .append(TitleManager.parseText(manager.getTitleText(id)))
+                );
+                rebuild();
+                broadcastChanges();
+            }
+            return;
+        }
+
+        if (slotId == CLEAR_MAIN_SLOT) {
+            manager.clearMainTitle(player.getUUID());
+            player.sendSystemMessage(Component.literal("已清除主称号。"));
+            rebuild();
+            broadcastChanges();
+            return;
+        }
+
+        if (slotId == CLEAR_SUB_SLOT) {
+            manager.clearSubTitle(player.getUUID());
+            player.sendSystemMessage(Component.literal("已清除副称号。"));
+            rebuild();
+            broadcastChanges();
+        }
+    }
+
+    /**
      * 双保险：即使原版尝试 PICKUP_ALL，
      * 称号展示槽也永远不能被选中。
      */
