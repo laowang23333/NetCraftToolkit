@@ -10,18 +10,18 @@ import net.minecraft.world.entity.player.Inventory;
 import net.minecraft.world.inventory.Slot;
 
 /**
- * 玩家称号 GUI。
+ * 称号 GUI 客户端界面。
  *
- * 重点：
- * FCL/Android 某些输入层会把 Screen 收到的 mouseX/mouseY
- * 当成窗口像素坐标，而 Minecraft GUI 的 Slot 坐标是
- * GUI-scaled 坐标。两者不一致时会同时导致：
+ * 注意：这个 Screen 不依赖 AbstractContainerScreen 的 hoveredSlot，
+ * 也不依赖单一的 mouseX/mouseY 坐标来源。
  *
- * 1. 点击称号完全没反应；
- * 2. 悬停 tooltip 完全不出现。
+ * FCL/Android 可能在不同输入路径下给 Screen 的坐标与窗口像素坐标
+ * 不一致，因此这里同时尝试：
+ * 1. Screen 传入的 GUI 坐标；
+ * 2. MouseHandler 的窗口像素坐标转换后的 GUI 坐标；
+ * 3. Screen 坐标按窗口 -> GUI 比例转换后的坐标。
  *
- * 因此这里统一从 Minecraft MouseHandler 取得原始窗口坐标，
- * 再按照当前 Window 的 GUI 缩放比例转换成 Minecraft GUI 坐标。
+ * 只要任意一套坐标命中实际 Slot，就执行操作。
  */
 public class TitleScreen extends AbstractContainerScreen<TitleMenu> {
 
@@ -50,7 +50,7 @@ public class TitleScreen extends AbstractContainerScreen<TitleMenu> {
         this.imageWidth = 176;
         this.imageHeight = 168;
 
-        // 只把“物品栏”标题下移一点。
+        // “物品栏”下移一点。
         this.inventoryLabelY = 70;
 
         this.titleLabelX = 8;
@@ -73,7 +73,7 @@ public class TitleScreen extends AbstractContainerScreen<TitleMenu> {
                 1.0F
         );
 
-        // 3 排箱子区域。
+        // 3 排容器区域。
         graphics.blit(
                 CHEST_TEXTURE,
                 leftPos,
@@ -109,25 +109,22 @@ public class TitleScreen extends AbstractContainerScreen<TitleMenu> {
     ) {
         super.render(graphics, mouseX, mouseY, partialTick);
 
-        // 不信任 FCL 传进来的 mouseX/mouseY，使用真实窗口鼠标位置。
-        double[] guiMouse = getGuiMouse();
-        double guiX = guiMouse[0];
-        double guiY = guiMouse[1];
+        /*
+         * Tooltip 同样使用多套坐标。
+         * 只对真正的称号/清除槽显示，避免干扰玩家背包 tooltip。
+         */
+        Slot hovered = findActionSlot(
+                mouseX,
+                mouseY
+        );
 
-        for (Slot slot : menu.slots) {
-            if (!isActionSlot(slot.index) || !slot.hasItem()) {
-                continue;
-            }
-
-            if (isInsideSlot(slot, guiX, guiY)) {
-                graphics.renderTooltip(
-                        this.font,
-                        slot.getItem(),
-                        (int) guiX,
-                        (int) guiY
-                );
-                break;
-            }
+        if (hovered != null && hovered.hasItem()) {
+            graphics.renderTooltip(
+                    this.font,
+                    hovered.getItem(),
+                    mouseX,
+                    mouseY
+            );
         }
     }
 
@@ -137,58 +134,74 @@ public class TitleScreen extends AbstractContainerScreen<TitleMenu> {
             double mouseY,
             int button
     ) {
-        if (button == 0 || button == 1) {
-            double[] guiMouse = getGuiMouse();
-            double guiX = guiMouse[0];
-            double guiY = guiMouse[1];
-
-            for (Slot slot : menu.slots) {
-                if (!isActionSlot(slot.index)) {
-                    continue;
-                }
-
-                if (!isInsideSlot(slot, guiX, guiY)) {
-                    continue;
-                }
-
-                NetCraftToolkit.LOGGER.info(
-                        "[NetCraftToolkit] 称号GUI点击命中: slot={}, button={}, guiMouse=({},{}), screenMouse=({},{}), hasItem={}",
-                        slot.index,
-                        button,
-                        guiX,
-                        guiY,
-                        mouseX,
-                        mouseY,
-                        slot.hasItem()
-                );
-
-                ModNetwork.sendToServer(
-                        new TitleActionPacket(
-                                slot.index,
-                                button == 1
-                        )
-                );
-
-                return true;
-            }
+        if (button != 0 && button != 1) {
+            return super.mouseClicked(
+                    mouseX,
+                    mouseY,
+                    button
+            );
         }
 
-        return super.mouseClicked(mouseX, mouseY, button);
+        Slot slot = findActionSlot(
+                mouseX,
+                mouseY
+        );
+
+        if (slot != null) {
+            NetCraftToolkit.LOGGER.info(
+                    "[NetCraftToolkit] 称号GUI点击命中: slot={}, button={}, hasItem={}, screenMouse=({},{}), leftTop=({},{}), guiSize={}x{}",
+                    slot.index,
+                    button,
+                    slot.hasItem(),
+                    mouseX,
+                    mouseY,
+                    leftPos,
+                    topPos,
+                    Minecraft.getInstance().getWindow().getGuiScaledWidth(),
+                    Minecraft.getInstance().getWindow().getGuiScaledHeight()
+            );
+
+            ModNetwork.sendToServer(
+                    new TitleActionPacket(
+                            slot.index,
+                            button == 1
+                    )
+            );
+
+            // 不交给原版容器搬运流程。
+            return true;
+        }
+
+        /*
+         * 这里非常重要：
+         * 即使没有命中我们的 action slot，也保留原版点击流程，
+         * 让玩家背包仍然可以正常操作。
+         */
+        return super.mouseClicked(
+                mouseX,
+                mouseY,
+                button
+        );
     }
 
     /**
-     * 将窗口像素坐标转换为 Minecraft 当前 GUI-scaled 坐标。
-     *
-     * 例如 1536x691 窗口、GUI 宽度 512 时：
-     * rawX 750 -> GUI X 250。
-     *
-     * 这正是 FCL/Android 输入层容易出错的地方。
+     * 用多套可能的坐标系寻找真实 Slot。
      */
-    private double[] getGuiMouse() {
-        Minecraft minecraft = Minecraft.getInstance();
+    private Slot findActionSlot(
+            double screenMouseX,
+            double screenMouseY
+    ) {
+        // 第一套：Screen 收到的坐标，通常已经是 GUI-scaled 坐标。
+        Slot slot = findActionSlotAt(
+                screenMouseX,
+                screenMouseY
+        );
 
-        double rawX = minecraft.mouseHandler.xpos();
-        double rawY = minecraft.mouseHandler.ypos();
+        if (slot != null) {
+            return slot;
+        }
+
+        Minecraft minecraft = Minecraft.getInstance();
 
         double windowWidth =
                 minecraft.getWindow().getWidth();
@@ -200,28 +213,70 @@ public class TitleScreen extends AbstractContainerScreen<TitleMenu> {
         double guiHeight =
                 minecraft.getWindow().getGuiScaledHeight();
 
-        if (windowWidth <= 0 || windowHeight <= 0) {
-            return new double[] { rawX, rawY };
+        /*
+         * 第二套：把 Screen 坐标当成窗口像素再缩放。
+         * 这是 FCL 输入层最可能出现的情况。
+         */
+        if (windowWidth > 0 && windowHeight > 0) {
+            slot = findActionSlotAt(
+                    screenMouseX * guiWidth / windowWidth,
+                    screenMouseY * guiHeight / windowHeight
+            );
+
+            if (slot != null) {
+                return slot;
+            }
         }
 
-        return new double[] {
-                rawX * guiWidth / windowWidth,
-                rawY * guiHeight / windowHeight
-        };
+        /*
+         * 第三套：直接读取 GLFW/Minecraft 当前窗口鼠标位置，
+         * 再转换成 GUI-scaled 坐标。
+         */
+        double rawX = minecraft.mouseHandler.xpos();
+        double rawY = minecraft.mouseHandler.ypos();
+
+        if (windowWidth > 0 && windowHeight > 0) {
+            slot = findActionSlotAt(
+                    rawX * guiWidth / windowWidth,
+                    rawY * guiHeight / windowHeight
+            );
+
+            if (slot != null) {
+                return slot;
+            }
+        }
+
+        /*
+         * 第四套：有些输入层已经把 MouseHandler 坐标缩放过，
+         * 直接再试一次。
+         */
+        return findActionSlotAt(
+                rawX,
+                rawY
+        );
     }
 
-    private boolean isInsideSlot(
-            Slot slot,
+    private Slot findActionSlotAt(
             double mouseX,
             double mouseY
     ) {
-        double x = leftPos + slot.x;
-        double y = topPos + slot.y;
+        for (Slot slot : menu.slots) {
+            if (!isActionSlot(slot.index)) {
+                continue;
+            }
 
-        return mouseX >= x
-                && mouseX < x + 16
-                && mouseY >= y
-                && mouseY < y + 16;
+            double x = leftPos + slot.x;
+            double y = topPos + slot.y;
+
+            if (mouseX >= x
+                    && mouseX < x + 16
+                    && mouseY >= y
+                    && mouseY < y + 16) {
+                return slot;
+            }
+        }
+
+        return null;
     }
 
     private static boolean isActionSlot(int slotId) {
