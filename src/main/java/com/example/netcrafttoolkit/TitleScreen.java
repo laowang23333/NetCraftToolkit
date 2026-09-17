@@ -6,18 +6,25 @@ import net.minecraft.client.gui.screens.inventory.AbstractContainerScreen;
 import net.minecraft.network.chat.Component;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.entity.player.Inventory;
+import net.minecraft.world.inventory.ClickType;
+import net.minecraft.world.inventory.Slot;
 
 /**
- * 玩家称号 GUI 客户端界面。
+ * 玩家称号 GUI。
  *
- * 这里故意不拦截 mouseClicked / slotClicked。
- * Minecraft 原版的 AbstractContainerScreen 点击流程会正常把
- * 容器点击发送到服务端，而 TitleMenu.clicked() 已经负责真正的
- * 主/副称号处理。
+ * GUI：
+ * - 使用原版 generic_54.png 的 3 排箱子区域 + 玩家背包区域。
+ * - “物品栏”标题下移一点，避免压在第三排称号槽上。
  *
- * 背景也按原版 ContainerScreen 的方式裁剪 generic_54.png：
- * 只显示 3 排箱子区域 + 玩家背包区域，
- * 不再把 generic_54 的 6 排箱子纹理直接画进 3 排菜单。
+ * 点击：
+ * - 不依赖屏幕坐标。
+ * - 直接使用 AbstractContainerScreen 已经识别出的实际 Slot。
+ * - 称号槽左键 -> 主称号。
+ * - 称号槽右键 -> 副称号。
+ * - 清除主/副称号按钮左右键均发送操作。
+ *
+ * 这对 FCL/Android 的 GUI 缩放尤其重要：
+ * 不再自己用 mouseX/mouseY 计算槽位。
  */
 public class TitleScreen extends AbstractContainerScreen<TitleMenu> {
 
@@ -27,13 +34,18 @@ public class TitleScreen extends AbstractContainerScreen<TitleMenu> {
                     "textures/gui/container/generic_54.png"
             );
 
-    /** 3 排容器本体：3 * 18 + 17。 */
+    private static final int FIRST_TITLE_SLOT = 9;
+    private static final int LAST_TITLE_SLOT = 17;
+    private static final int CLEAR_MAIN_SLOT = 20;
+    private static final int CLEAR_SUB_SLOT = 24;
+
+    /** 3 排 ChestMenu 的容器区域。 */
     private static final int CONTAINER_HEIGHT = 71;
 
-    /** generic_54.png 中玩家背包区域的起始 Y。 */
+    /** generic_54.png 中玩家物品栏区域的纹理 Y。 */
     private static final int PLAYER_INVENTORY_TEXTURE_Y = 126;
 
-    /** 玩家背包 + 快捷栏区域高度。 */
+    /** 玩家物品栏 + 快捷栏区域。 */
     private static final int PLAYER_INVENTORY_HEIGHT = 96;
 
     public TitleScreen(
@@ -43,17 +55,12 @@ public class TitleScreen extends AbstractContainerScreen<TitleMenu> {
     ) {
         super(menu, inventory, title);
 
-        /*
-         * 3 排 ChestMenu 的标准尺寸。
-         * 168 = 114 + 3 * 18
-         */
+        // 3 排 ChestMenu 的标准整体高度。
         this.imageWidth = 176;
         this.imageHeight = 168;
 
-        /*
-         * ChestScreen 3 排时玩家物品栏标题的标准位置。
-         */
-        this.inventoryLabelY = 61;
+        // 原来 61 会压在第三排称号槽上；下移到 70。
+        this.inventoryLabelY = 70;
 
         this.titleLabelX = 8;
         this.titleLabelY = 6;
@@ -66,11 +73,7 @@ public class TitleScreen extends AbstractContainerScreen<TitleMenu> {
             int mouseX,
             int mouseY
     ) {
-        /*
-         * 1.20.1 的 AbstractContainerScreen 背景流程中，
-         * 自定义容器背景需要先画屏幕暗背景。
-         * 这样也消除“GUI did not draw the dark background layer”警告。
-         */
+        // 自定义容器需要主动绘制暗背景。
         this.renderBackground(graphics);
 
         RenderSystem.setShaderColor(
@@ -81,11 +84,8 @@ public class TitleScreen extends AbstractContainerScreen<TitleMenu> {
         );
 
         /*
-         * 第一段：
-         * generic_54 左上角只取 3 排箱子需要的 176x71。
-         *
-         * 注意这里显式指定 256x256 纹理尺寸，
-         * 因为 generic_54.png 是 256x256 的整张 GUI 贴图。
+         * 只取 generic_54 的前三排箱子区域。
+         * 绝不把整张 6 排箱子贴图直接画进来。
          */
         graphics.blit(
                 CHEST_TEXTURE,
@@ -100,17 +100,7 @@ public class TitleScreen extends AbstractContainerScreen<TitleMenu> {
         );
 
         /*
-         * 第二段：
-         * 从 generic_54 的 y=126 开始取玩家背包区域，
-         * 接在 3 排容器背景后面。
-         *
-         * 这样屏幕上实际显示的是：
-         *
-         *   3 排称号槽
-         *   玩家物品栏
-         *   快捷栏
-         *
-         * 而不是把 6 排箱子纹理硬塞进来。
+         * 接上 generic_54 的玩家物品栏/快捷栏区域。
          */
         graphics.blit(
                 CHEST_TEXTURE,
@@ -125,17 +115,44 @@ public class TitleScreen extends AbstractContainerScreen<TitleMenu> {
         );
     }
 
-    /*
-     * 这里没有重写 mouseClicked() 或 slotClicked()。
+    /**
+     * Minecraft 已经根据实际 GUI 缩放找到了 Slot 后，
+     * 在这里接管称号操作。
      *
-     * 点击会走 Minecraft 原版 AbstractContainerScreen -> 菜单点击
-     * 流程，最终由 TitleMenu.clicked() 在服务端处理：
-     *
-     * 左键称号 = 主称号
-     * 右键称号 = 副称号
-     * 清除主/副称号同样由 TitleMenu 处理
-     *
-     * 不再从客户端自行发送 TitleActionPacket，
-     * 避免手机/FCL 触摸输入被我们自己的点击拦截逻辑吞掉。
+     * 这是点击修复的关键：不再依赖自己计算 mouseX/mouseY。
      */
+    @Override
+    protected void slotClicked(
+            Slot slot,
+            int slotId,
+            int mouseButton,
+            ClickType clickType
+    ) {
+        if (isActionSlot(slotId)
+                && (mouseButton == 0 || mouseButton == 1)) {
+
+            ModNetwork.sendToServer(
+                    new TitleActionPacket(
+                            slotId,
+                            mouseButton == 1
+                    )
+            );
+
+            return;
+        }
+
+        super.slotClicked(
+                slot,
+                slotId,
+                mouseButton,
+                clickType
+        );
+    }
+
+    private static boolean isActionSlot(int slotId) {
+        return (slotId >= FIRST_TITLE_SLOT
+                && slotId <= LAST_TITLE_SLOT)
+                || slotId == CLEAR_MAIN_SLOT
+                || slotId == CLEAR_SUB_SLOT;
+    }
 }
