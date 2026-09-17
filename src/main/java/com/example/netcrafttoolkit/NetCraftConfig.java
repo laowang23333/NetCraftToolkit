@@ -230,6 +230,13 @@ public class NetCraftConfig {
 
             syncDropManager();
 
+            // 将 [equipment."..."] 中的覆盖值真正写入 NetCraft 1.4.18 运行时配置。
+            // 这里只通过反射修改 NetCraft 已加载的 ConfigValue。
+            EquipmentOverrideWriter.applyToWorld(
+                    server,
+                    this
+            );
+
             NetCraftToolkit.LOGGER.info(
                     "[NetCraftToolkit] Configuration loaded successfully. Entities: {}, drops: {}",
                     entityAttributes.size(),
@@ -330,6 +337,12 @@ public class NetCraftConfig {
                 if (currentServer != null) {
                     currentServer.execute(() -> {
                         try {
+                            // 热重载时先应用装备覆盖，再刷新已经存在的 NetCraft 生物。
+                            EquipmentOverrideWriter.applyToWorld(
+                                    currentServer,
+                                    this
+                            );
+
                             NetCraftAttributeManager attributeManager =
                                     NetCraftToolkit.getAttributeManager();
 
