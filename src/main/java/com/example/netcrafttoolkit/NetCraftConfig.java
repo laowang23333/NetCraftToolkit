@@ -1230,9 +1230,7 @@ public class NetCraftConfig {
                 "# 渐变格式：<gradient:#FF0000:#00FFFF>称号</gradient>，可填写多个颜色。\n" +
                 "# 管理指令仅 OP 可用；玩家通过 /mytitle 打开自己的称号 GUI。\n\n" +
                 "[title]\n" +
-                "warrior = \"§6§l战神\"\n" +
-                "gold_king = \"&#FFD700§l黄金王者\"\n" +
-                "rainbow = \"<gradient:#FF0000:#FFFF00:#00FF00:#00FFFF:#0000FF>彩虹之王</gradient>\"\n\n";
+                "wuyutianming = \"<gradient:#0047FF:#00FFFF:#FFFFFF:#00FF88:#0066FF>雾雨天明</gradient>\"\n\n";
 
         int bossIndex = text.indexOf("# BOSS");
         if (bossIndex >= 0) {
@@ -1280,9 +1278,7 @@ public class NetCraftConfig {
         out.append("# 渐变格式：<gradient:#FF0000:#00FFFF>称号</gradient>，可填写多个颜色。\n");
         out.append("# 管理指令仅 OP 可用；玩家通过 /mytitle 打开自己的称号 GUI。\n\n");
         out.append("[title]\n");
-        out.append("warrior = \"§6§l战神\"\n");
-        out.append("gold_king = \"&#FFD700§l黄金王者\"\n");
-        out.append("rainbow = \"<gradient:#FF0000:#FFFF00:#00FF00:#00FFFF:#0000FF>彩虹之王</gradient>\"\n");
+        out.append("wuyutianming = \"<gradient:#0047FF:#00FFFF:#FFFFFF:#00FF88:#0066FF>雾雨天明</gradient>\"\n");
         out.append("\n");
 
         out.append("# ================================================================\n");
