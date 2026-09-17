@@ -21,6 +21,10 @@ import java.util.List;
 /**
  * 玩家称号 GUI。
  * 左键 = 主称号；右键 = 副称号；点击清除按钮取消对应称号。
+ *
+ * 重要：
+ * - GUI 内所有槽位都是只读展示槽，绝不允许拿取/放入/交换。
+ * - 称号操作只在服务端执行。
  */
 public class TitleMenu extends ChestMenu {
 
@@ -38,7 +42,7 @@ public class TitleMenu extends ChestMenu {
     /**
      * MenuType 的标准构造器。
      * 服务端创建时从 NetCraftToolkit 获取 TitleManager；
-     * 客户端创建时 manager 可能为 null，此时仅负责显示服务端同步过来的槽位内容。
+     * 客户端创建时 manager 可能为 null。
      */
     public TitleMenu(int containerId, Inventory inventory) {
         this(new SimpleContainer(SIZE), containerId, inventory);
@@ -49,6 +53,24 @@ public class TitleMenu extends ChestMenu {
         this.player = inventory.player;
         this.manager = NetCraftToolkit.getTitleManager();
         this.titleContainer = container;
+
+        /*
+         * ChestMenu 默认使用普通 Slot，会允许客户端尝试拿取展示物。
+         * 把前 27 个容器槽替换成真正的只读 Slot。
+         */
+        for (int i = 0; i < SIZE; i++) {
+            int row = i / 9;
+            int column = i % 9;
+            slots.set(
+                    i,
+                    new LockedSlot(
+                            titleContainer,
+                            i,
+                            8 + column * 18,
+                            18 + row * 18
+                    )
+            );
+        }
 
         if (manager != null) {
             rebuild();
@@ -68,6 +90,7 @@ public class TitleMenu extends ChestMenu {
         }
 
         slotTitleIds.clear();
+
         for (int i = 0; i < SIZE; i++) {
             titleContainer.setItem(i, ItemStack.EMPTY);
         }
@@ -76,147 +99,326 @@ public class TitleMenu extends ChestMenu {
         main.setHoverName(Component.literal("主称号：")
                 .append(manager.getMainTitle(player.getUUID()) == null
                         ? Component.literal("未设置")
-                        : TitleManager.parseText(manager.getTitleText(manager.getMainTitle(player.getUUID())))));
+                        : TitleManager.parseText(
+                                manager.getTitleText(
+                                        manager.getMainTitle(player.getUUID())
+                                )
+                        )));
         titleContainer.setItem(2, main);
 
         ItemStack sub = new ItemStack(Items.AMETHYST_SHARD);
         sub.setHoverName(Component.literal("副称号：")
                 .append(manager.getSubTitle(player.getUUID()) == null
                         ? Component.literal("未设置")
-                        : TitleManager.parseText(manager.getTitleText(manager.getSubTitle(player.getUUID())))));
+                        : TitleManager.parseText(
+                                manager.getTitleText(
+                                        manager.getSubTitle(player.getUUID())
+                                )
+                        )));
         titleContainer.setItem(6, sub);
 
         int slot = FIRST_TITLE_SLOT;
         int index = 0;
+
         for (String id : manager.getOwnedTitles(player.getUUID())) {
             String text = manager.getTitleText(id);
+
             if (text == null) {
                 continue;
             }
+
             if (slot > LAST_TITLE_SLOT) {
                 break;
             }
 
-            ItemStack stack = new ItemStack(index % 2 == 0 ? Items.NAME_TAG : Items.ENCHANTED_BOOK);
+            ItemStack stack = new ItemStack(
+                    index % 2 == 0
+                            ? Items.NAME_TAG
+                            : Items.ENCHANTED_BOOK
+            );
+
             if (id.equals(manager.getMainTitle(player.getUUID()))
                     || id.equals(manager.getSubTitle(player.getUUID()))) {
+
                 EnchantmentHelper.setEnchantments(
-                        java.util.Map.of(Enchantments.UNBREAKING, 1),
+                        java.util.Map.of(
+                                Enchantments.UNBREAKING,
+                                1
+                        ),
                         stack
                 );
             }
 
-            stack.setHoverName(TitleManager.parseText(text));
             stack.setHoverName(
-                    stack.getHoverName().copy().append(Component.literal("  [" + id + "]"))
+                    TitleManager.parseText(text)
             );
+
+            stack.setHoverName(
+                    stack.getHoverName()
+                            .copy()
+                            .append(Component.literal("  [" + id + "]"))
+            );
+
             titleContainer.setItem(slot, stack);
             slotTitleIds.add(id);
+
             slot++;
             index++;
         }
 
         ItemStack clearMain = new ItemStack(Items.BARRIER);
-        clearMain.setHoverName(Component.literal("清除主称号"));
-        titleContainer.setItem(CLEAR_MAIN_SLOT, clearMain);
+        clearMain.setHoverName(
+                Component.literal("清除主称号")
+        );
+        titleContainer.setItem(
+                CLEAR_MAIN_SLOT,
+                clearMain
+        );
 
         ItemStack clearSub = new ItemStack(Items.BARRIER);
-        clearSub.setHoverName(Component.literal("清除副称号"));
-        titleContainer.setItem(CLEAR_SUB_SLOT, clearSub);
+        clearSub.setHoverName(
+                Component.literal("清除副称号")
+        );
+        titleContainer.setItem(
+                CLEAR_SUB_SLOT,
+                clearSub
+        );
     }
 
     @Override
-    public void clicked(int slotId, int dragType, ClickType clickType, Player clickedPlayer) {
+    public void clicked(
+            int slotId,
+            int dragType,
+            ClickType clickType,
+            Player clickedPlayer
+    ) {
         if (clickedPlayer != player) {
             return;
         }
 
-        // 客户端也不能把展示图标拿到光标里；真正的称号操作由服务端菜单处理。
-        if (slotId >= 0 && slotId < SIZE && manager == null) {
-            return;
-        }
+        /*
+         * 所有 GUI 容器槽位都由我们自己处理。
+         * 任何非 PICKUP 操作（拖动、交换、丢弃、快速移动等）
+         * 都直接拒绝，防止展示物进入玩家背包。
+         */
+        if (slotId >= 0 && slotId < SIZE) {
 
-        // 客户端只负责发送点击包，所有称号状态修改必须由服务端执行。
-        // 这样可以避免客户端本地状态和服务端状态互相覆盖，导致称号“锁死”。
-        if (!(clickedPlayer instanceof ServerPlayer)) {
-            if (slotId >= 0 && slotId < SIZE) {
+            if (!(clickedPlayer instanceof ServerPlayer)) {
+                /*
+                 * 客户端只显示服务端同步的数据。
+                 * 不在客户端修改称号状态。
+                 */
                 return;
             }
-            super.clicked(slotId, dragType, clickType, clickedPlayer);
-            return;
-        }
 
-        if (manager == null) {
-            return;
-        }
+            if (manager == null) {
+                return;
+            }
 
-        if (slotId >= FIRST_TITLE_SLOT && slotId <= LAST_TITLE_SLOT) {
-            int index = slotId - FIRST_TITLE_SLOT;
-            if (index >= 0 && index < slotTitleIds.size()) {
-                String id = slotTitleIds.get(index);
+            /*
+             * 称号槽：
+             * 左键（dragType=0）= 主称号
+             * 右键（dragType=1）= 副称号
+             */
+            if (slotId >= FIRST_TITLE_SLOT
+                    && slotId <= LAST_TITLE_SLOT
+                    && clickType == ClickType.PICKUP) {
 
-                boolean rightClick = dragType == 1;
+                int index =
+                        slotId - FIRST_TITLE_SLOT;
 
-                if (rightClick) {
-                    if (manager.setSubTitle(player.getUUID(), id)) {
-                        player.sendSystemMessage(
-                                Component.literal("已设置副称号：")
-                                        .append(TitleManager.parseText(manager.getTitleText(id)))
-                        );
+                if (index >= 0
+                        && index < slotTitleIds.size()) {
+
+                    String id =
+                            slotTitleIds.get(index);
+
+                    boolean rightClick =
+                            dragType == 1;
+
+                    if (rightClick) {
+
+                        if (manager.setSubTitle(
+                                player.getUUID(),
+                                id
+                        )) {
+
+                            player.sendSystemMessage(
+                                    Component.literal(
+                                            "已设置副称号："
+                                    ).append(
+                                            TitleManager.parseText(
+                                                    manager.getTitleText(id)
+                                            )
+                                    )
+                            );
+                        }
+
+                    } else {
+
+                        if (manager.setMainTitle(
+                                player.getUUID(),
+                                id
+                        )) {
+
+                            player.sendSystemMessage(
+                                    Component.literal(
+                                            "已设置主称号："
+                                    ).append(
+                                            TitleManager.parseText(
+                                                    manager.getTitleText(id)
+                                            )
+                                    )
+                            );
+                        }
                     }
-                } else {
-                    if (manager.setMainTitle(player.getUUID(), id)) {
-                        player.sendSystemMessage(
-                                Component.literal("已设置主称号：")
-                                        .append(TitleManager.parseText(manager.getTitleText(id)))
-                        );
-                    }
+
+                    rebuild();
+                    broadcastChanges();
                 }
+
+                return;
+            }
+
+            /*
+             * 清除按钮。
+             */
+            if (slotId == CLEAR_MAIN_SLOT
+                    && clickType == ClickType.PICKUP) {
+
+                manager.clearMainTitle(
+                        player.getUUID()
+                );
+
+                player.sendSystemMessage(
+                        Component.literal(
+                                "已清除主称号。"
+                        )
+                );
 
                 rebuild();
                 broadcastChanges();
+
                 return;
             }
-        }
 
-        if (slotId == CLEAR_MAIN_SLOT && clickType == ClickType.PICKUP) {
-            manager.clearMainTitle(player.getUUID());
-            player.sendSystemMessage(Component.literal("已清除主称号。"));
-            rebuild();
-            broadcastChanges();
+            if (slotId == CLEAR_SUB_SLOT
+                    && clickType == ClickType.PICKUP) {
+
+                manager.clearSubTitle(
+                        player.getUUID()
+                );
+
+                player.sendSystemMessage(
+                        Component.literal(
+                                "已清除副称号。"
+                        )
+                );
+
+                rebuild();
+                broadcastChanges();
+
+                return;
+            }
+
+            /*
+             * 其余 GUI 槽位全部是装饰/展示物，禁止任何操作。
+             */
             return;
         }
 
-        if (slotId == CLEAR_SUB_SLOT && clickType == ClickType.PICKUP) {
-            manager.clearSubTitle(player.getUUID());
-            player.sendSystemMessage(Component.literal("已清除副称号。"));
-            rebuild();
-            broadcastChanges();
-            return;
-        }
-
-        // 称号菜单里的物品全部是展示图标/按钮，禁止拿走、丢弃、拖动或交换。
-        if (slotId >= 0 && slotId < SIZE) {
-            return;
-        }
-
-        super.clicked(slotId, dragType, clickType, clickedPlayer);
+        /*
+         * 玩家背包区域仍然交给原版处理。
+         */
+        super.clicked(
+                slotId,
+                dragType,
+                clickType,
+                clickedPlayer
+        );
     }
 
+    /**
+     * 双保险：即使原版尝试 PICKUP_ALL，
+     * 称号展示槽也永远不能被选中。
+     */
     @Override
-    public boolean canTakeItemForPickAll(ItemStack stack, Slot slot) {
-        return slot.container != titleContainer && super.canTakeItemForPickAll(stack, slot);
+    public boolean canTakeItemForPickAll(
+            ItemStack stack,
+            Slot slot
+    ) {
+        return slot.container != titleContainer
+                && super.canTakeItemForPickAll(
+                        stack,
+                        slot
+                );
     }
 
+    /**
+     * 关闭 GUI 时清空展示容器，
+     * 绝不让展示物掉落到世界。
+     */
     @Override
     public void removed(Player player) {
-        // 这些图标不是玩家物品，关闭 GUI 时清空容器，绝不掉落到世界。
         titleContainer.clearContent();
         super.removed(player);
     }
 
+    /**
+     * 禁止 Shift+点击从 GUI 搬运任何东西。
+     */
     @Override
-    public ItemStack quickMoveStack(Player player, int index) {
+    public ItemStack quickMoveStack(
+            Player player,
+            int index
+    ) {
         return ItemStack.EMPTY;
+    }
+
+    /**
+     * 真正的只读展示槽。
+     *
+     * mayPickup=false：
+     *   无论左键、右键、Shift、双击、拖动等方式，
+     *   都不能把展示物拿走。
+     *
+     * mayPlace=false：
+     *   玩家也不能把自己的物品塞进称号 GUI。
+     */
+    private static final class LockedSlot extends Slot {
+
+        private LockedSlot(
+                SimpleContainer container,
+                int slot,
+                int x,
+                int y
+        ) {
+            super(
+                    container,
+                    slot,
+                    x,
+                    y
+            );
+        }
+
+        @Override
+        public boolean mayPickup(Player player) {
+            return false;
+        }
+
+        @Override
+        public boolean mayPlace(ItemStack stack) {
+            return false;
+        }
+
+        @Override
+        public int getMaxStackSize() {
+            return 0;
+        }
+
+        @Override
+        public int getMaxStackSize(ItemStack stack) {
+            return 0;
+        }
     }
 }
