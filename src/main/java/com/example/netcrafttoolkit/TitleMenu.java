@@ -7,7 +7,6 @@ import net.minecraft.world.entity.player.Inventory;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.inventory.ChestMenu;
 import net.minecraft.world.inventory.ClickType;
-import net.minecraft.world.inventory.MenuType;
 import net.minecraft.world.inventory.Slot;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
@@ -49,7 +48,7 @@ public class TitleMenu extends ChestMenu {
     }
 
     private TitleMenu(SimpleContainer container, int containerId, Inventory inventory) {
-        super(MenuType.GENERIC_9x3, containerId, inventory, container, 3);
+        super(ModMenus.TITLE_MENU, containerId, inventory, container, 3);
         this.player = inventory.player;
         this.manager = NetCraftToolkit.getTitleManager();
         this.titleContainer = container;
