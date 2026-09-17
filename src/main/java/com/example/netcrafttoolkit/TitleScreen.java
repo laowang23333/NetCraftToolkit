@@ -32,6 +32,14 @@ public class TitleScreen extends AbstractContainerScreen<TitleMenu> {
         this.titleLabelY = 6;
     }
 
+    /**
+     * 兼容旧版 TitleClientInputEvents。
+     * v10 起点击完全交给原版 Container，因此这里不再自行接管点击。
+     */
+    public boolean handleExternalClick(double mouseX, double mouseY, int button) {
+        return false;
+    }
+
     @Override
     protected void renderBg(
             GuiGraphics graphics,

@@ -8,13 +8,11 @@ import net.minecraftforge.network.NetworkEvent;
 import java.util.function.Supplier;
 
 /**
- * 客户端称号 GUI 点击 -> 服务端操作包。
+ * 旧称号点击数据包兼容类。
  *
- * 客户端只发送：
- * - slotId
- * - 是否右键
- *
- * 真正的称号修改仍然只在服务端执行。
+ * 当前 GUI 已改为完全使用 Minecraft 原版 Container 点击包，
+ * 因此正常情况下不会再发送 TitleActionPacket。
+ * 保留解码/处理入口，避免旧网络注册代码导致编译失败。
  */
 public final class TitleActionPacket {
 
@@ -26,21 +24,13 @@ public final class TitleActionPacket {
         this.rightClick = rightClick;
     }
 
-    public static void encode(
-            TitleActionPacket packet,
-            FriendlyByteBuf buf
-    ) {
+    public static void encode(TitleActionPacket packet, FriendlyByteBuf buf) {
         buf.writeVarInt(packet.slotId);
         buf.writeBoolean(packet.rightClick);
     }
 
-    public static TitleActionPacket decode(
-            FriendlyByteBuf buf
-    ) {
-        return new TitleActionPacket(
-                buf.readVarInt(),
-                buf.readBoolean()
-        );
+    public static TitleActionPacket decode(FriendlyByteBuf buf) {
+        return new TitleActionPacket(buf.readVarInt(), buf.readBoolean());
     }
 
     public static void handle(
@@ -51,36 +41,14 @@ public final class TitleActionPacket {
 
         context.enqueueWork(() -> {
             ServerPlayer player = context.getSender();
-
             if (player == null) {
-                NetCraftToolkit.LOGGER.warn(
-                        "[NetCraftToolkit] TitleActionPacket 收到时 sender=null"
-                );
                 return;
             }
 
-            AbstractContainerMenu menu =
-                    player.containerMenu;
-
-            NetCraftToolkit.LOGGER.info(
-                    "[NetCraftToolkit] 收到称号点击包: player={}, slot={}, rightClick={}, menu={}",
-                    player.getGameProfile().getName(),
-                    packet.slotId,
-                    packet.rightClick,
-                    menu.getClass().getName()
-            );
-
+            AbstractContainerMenu menu = player.containerMenu;
             if (menu instanceof TitleMenu titleMenu) {
-                titleMenu.handleTitleAction(
-                        packet.slotId,
-                        packet.rightClick
-                );
-            } else {
-                NetCraftToolkit.LOGGER.warn(
-                        "[NetCraftToolkit] 称号点击包被拒绝：当前菜单不是 TitleMenu，player={}, menu={}",
-                        player.getGameProfile().getName(),
-                        menu.getClass().getName()
-                );
+                // 仅作为旧客户端的兼容入口，实际新 GUI 不会走这里。
+                titleMenu.handleTitleAction(packet.slotId, packet.rightClick);
             }
         });
 

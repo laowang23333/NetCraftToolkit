@@ -243,6 +243,55 @@ public class TitleMenu extends ChestMenu {
     }
 
     /**
+     * 兼容旧版 TitleActionPacket 的入口。
+     * 当前 GUI 已经完全走 Minecraft 原版 Container 点击链路，
+     * 正常情况下不会再调用这个方法；保留它是为了避免旧代码导致编译失败。
+     */
+    public void handleTitleAction(int slotId, boolean rightClick) {
+        if (manager == null) {
+            return;
+        }
+
+        if (slotId >= FIRST_TITLE_SLOT && slotId <= LAST_TITLE_SLOT) {
+            int index = slotId - FIRST_TITLE_SLOT;
+            if (index < 0 || index >= slotTitleIds.size()) {
+                return;
+            }
+
+            String id = slotTitleIds.get(index);
+            boolean changed = rightClick
+                    ? manager.setSubTitle(player.getUUID(), id)
+                    : manager.setMainTitle(player.getUUID(), id);
+
+            if (changed) {
+                player.sendSystemMessage(
+                        Component.literal(rightClick ? "已设置副称号：" : "已设置主称号：")
+                                .append(TitleManager.parseText(manager.getTitleText(id)))
+                );
+            }
+
+            rebuild();
+            broadcastChanges();
+            return;
+        }
+
+        if (slotId == CLEAR_MAIN_SLOT) {
+            manager.clearMainTitle(player.getUUID());
+            player.sendSystemMessage(Component.literal("已清除主称号。"));
+            rebuild();
+            broadcastChanges();
+            return;
+        }
+
+        if (slotId == CLEAR_SUB_SLOT) {
+            manager.clearSubTitle(player.getUUID());
+            player.sendSystemMessage(Component.literal("已清除副称号。"));
+            rebuild();
+            broadcastChanges();
+        }
+    }
+
+    /**
      * 关闭 GUI 时清空展示容器，绝不让展示物掉落到世界。
      */
     @Override
