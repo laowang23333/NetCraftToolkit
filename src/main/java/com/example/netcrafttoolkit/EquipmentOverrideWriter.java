@@ -4,6 +4,7 @@ import com.mojang.logging.LogUtils;
 import net.minecraft.server.MinecraftServer;
 import org.slf4j.Logger;
 
+import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.Locale;
@@ -101,7 +102,7 @@ public final class EquipmentOverrideWriter {
 
             enableEquipmentOverride(configClass);
 
-            Method configKeyConstructor = configKeyClass.getConstructor(
+            Constructor<?> configKeyConstructor = configKeyClass.getConstructor(
                     groupClass,
                     classTypeClass,
                     slotClass,
