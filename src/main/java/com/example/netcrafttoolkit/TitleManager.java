@@ -1327,12 +1327,14 @@ public class TitleManager {
             return colors.get(0);
         }
 
+        // 按“字符中心位置”取样，而不是简单地把颜色平均塞给字符。
+        // 这样 4 个字的短称号也能保持明显的首尾渐变。
         double position =
-                (double) index
-                        / Math.max(
-                        1,
-                        length - 1
-                );
+                (index + 0.5D)
+                        / Math.max(1.0D, length);
+
+        // 保证首字符从第一个颜色开始、末字符落在最后一个颜色附近。
+        position = Math.max(0.0D, Math.min(1.0D, position));
 
         double scaled =
                 position
@@ -1350,32 +1352,30 @@ public class TitleManager {
         double local =
                 scaled - left;
 
-        int c1 =
-                colors.get(left);
+        // SmoothStep：让颜色过渡更自然，避免 4 字短称号看起来像“四色切换”。
+        local =
+                local * local * (3.0D - 2.0D * local);
 
-        int c2 =
-                colors.get(right);
+        int c1 = colors.get(left);
+        int c2 = colors.get(right);
 
-        int r =
-                interpolate(
-                        (c1 >> 16) & 0xFF,
-                        (c2 >> 16) & 0xFF,
-                        local
-                );
+        int r = interpolate(
+                (c1 >> 16) & 0xFF,
+                (c2 >> 16) & 0xFF,
+                local
+        );
 
-        int g =
-                interpolate(
-                        (c1 >> 8) & 0xFF,
-                        (c2 >> 8) & 0xFF,
-                        local
-                );
+        int g = interpolate(
+                (c1 >> 8) & 0xFF,
+                (c2 >> 8) & 0xFF,
+                local
+        );
 
-        int b =
-                interpolate(
-                        c1 & 0xFF,
-                        c2 & 0xFF,
-                        local
-                );
+        int b = interpolate(
+                c1 & 0xFF,
+                c2 & 0xFF,
+                local
+        );
 
         return (r << 16)
                 | (g << 8)
