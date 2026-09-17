@@ -2,428 +2,425 @@ package com.example.netcrafttoolkit;
 
 import com.mojang.logging.LogUtils;
 import net.minecraft.server.MinecraftServer;
-import net.minecraft.world.level.storage.LevelResource;
 import org.slf4j.Logger;
 
-import java.io.IOException;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
-import java.util.ArrayList;
-import java.util.List;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
+import java.util.Locale;
 import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
-public class EquipmentOverrideWriter {
+/**
+ * NetCraft 装备数值热加载器。
+ *
+ * 不再修改 world/serverconfig/netcraft-server.toml 的文本内容。
+ *
+ * 工作方式：
+ * 1. 读取 NetCraft Toolkit 的 [equipment."..."] 配置。
+ * 2. 通过反射取得 NetCraft 1.4.18 的 EquipmentStatConfig.VALUES。
+ * 3. 直接调用 Forge ConfigValue.set(...) 修改运行时配置。
+ * 4. 调用 ConfigValue.save() 持久化。
+ * 5. 再由 NetCraftToolkit 刷新已经存在的实体。
+ *
+ * 因此修改 netcrafttoolkit.toml 后，不需要服务器重启。
+ */
+public final class EquipmentOverrideWriter {
 
     private static final Logger LOGGER = LogUtils.getLogger();
 
+    private static final String CONFIG_CLASS =
+            "com.jiufeng.netcraft.config.EquipmentStatConfig";
+
+    private static final String GROUP_CLASS =
+            CONFIG_CLASS + "$Group";
+
+    private static final String CLASS_TYPE_CLASS =
+            CONFIG_CLASS + "$ClassType";
+
+    private static final String SLOT_CLASS =
+            CONFIG_CLASS + "$Slot";
+
+    private static final String FIELD_CLASS =
+            CONFIG_CLASS + "$Field";
+
     /**
-     * 把 NetCraft Toolkit 的装备覆盖配置
-     * 写入当前世界的 NetCraft serverconfig。
+     * NetCraft 装备注册名格式：
      *
-     * 配置文件：
-     *
-     * world/serverconfig/netcraft-server.toml
-     *
-     * 规则：
-     *
-     * >= 0 ：覆盖 NetCraft 原值
-     * -1   ：不覆盖，保留 NetCraft 原值
-     *
-     * 同时自动开启：
-     *
-     * enableEquipmentStatOverride = true
+     * weapon_knight_t1_mhand
+     * weapon_mage_t3_hand
+     * equipment_knight_t1_1
+     * weapon_knight_legend1_mhand
+     */
+    private static final Pattern EQUIPMENT_ID_PATTERN = Pattern.compile(
+            "^(?:weapon|equipment)_(knight|archer|mage|summoner|dragonknight|wararcher)_(t\\d+|legend\\d+)_(mhand|hand|[1-4])$",
+            Pattern.CASE_INSENSITIVE
+    );
+
+    private EquipmentOverrideWriter() {
+    }
+
+    /**
+     * 把 Toolkit 的装备覆盖值直接应用到 NetCraft 运行时配置。
      */
     public static void applyToWorld(
             MinecraftServer server,
             NetCraftConfig config
     ) {
-
         if (server == null || config == null) {
             return;
         }
 
-        /*
-         * 获取当前世界目录。
-         */
-        Path worldPath = server.getWorldPath(
-                LevelResource.ROOT
-        );
-
-        /*
-         * NetCraft 服务端配置。
-         */
-        Path cfg = worldPath
-                .resolve("serverconfig")
-                .resolve("netcraft-server.toml");
-
-        /*
-         * 文件不存在时不创建。
-         *
-         * 因为 NetCraft 本身负责生成这个文件。
-         */
-        if (!Files.exists(cfg)) {
-
-            LOGGER.warn(
-                    "[NetCraftToolkit] 未找到 NetCraft serverconfig: {}",
-                    cfg
-            );
-
-            return;
-        }
-
-        /*
-         * 获取装备覆盖配置。
-         */
         Map<String, Map<String, Double>> overrides =
                 config.getEquipmentOverrides();
 
         if (overrides == null || overrides.isEmpty()) {
-
             LOGGER.info(
-                    "[NetCraftToolkit] 没有装备覆盖配置，跳过写入。"
+                    "[NetCraftToolkit] 没有装备覆盖配置，跳过 NetCraft 装备热加载。"
             );
-
             return;
         }
 
         try {
-
-            /*
-             * 读取原始 TOML。
-             */
-            List<String> lines = Files.readAllLines(
-                    cfg,
-                    StandardCharsets.UTF_8
+            Class<?> configClass = Class.forName(CONFIG_CLASS);
+            Class<?> groupClass = Class.forName(GROUP_CLASS);
+            Class<?> classTypeClass = Class.forName(CLASS_TYPE_CLASS);
+            Class<?> slotClass = Class.forName(SLOT_CLASS);
+            Class<?> fieldClass = Class.forName(FIELD_CLASS);
+            Class<?> configKeyClass = Class.forName(
+                    CONFIG_CLASS + "$ConfigKey"
             );
 
-            List<String> out =
-                    new ArrayList<>(lines.size());
-
-            String curTier = null;
-            String curJob = null;
-            String curSlot = null;
-
-            boolean inEquipmentStat = false;
-
-            int writeCount = 0;
-
-            /*
-             * 逐行处理。
-             */
-            for (String line : lines) {
-
-                String trimmed = line.trim();
-
-                /*
-                 * ==============================
-                 * TOML 段头
-                 * ==============================
-                 */
-                if (
-                        trimmed.startsWith("[")
-                                && trimmed.endsWith("]")
-                ) {
-
-                    String sec =
-                            trimmed.substring(
-                                    1,
-                                    trimmed.length() - 1
-                            );
-
-                    String[] parts =
-                            sec.split("\\.");
-
-                    /*
-                     * 判断是否进入：
-                     *
-                     * [equipmentStat....]
-                     */
-                    inEquipmentStat =
-                            parts.length >= 1
-                                    && parts[0].equals(
-                                    "equipmentStat"
-                            );
-
-                    curTier = null;
-                    curJob = null;
-                    curSlot = null;
-
-                    if (inEquipmentStat) {
-
-                        /*
-                         * [equipmentStat.tier]
-                         */
-                        if (parts.length == 2) {
-
-                            curTier = parts[1];
-                        }
-
-                        /*
-                         * [equipmentStat.tier.job]
-                         */
-                        else if (parts.length == 3) {
-
-                            curTier = parts[1];
-                            curJob = parts[2];
-                        }
-
-                        /*
-                         * [equipmentStat.tier.job.slot]
-                         */
-                        else if (parts.length == 4) {
-
-                            curTier = parts[1];
-                            curJob = parts[2];
-                            curSlot = parts[3];
-                        }
-                    }
-
-                    /*
-                     * 段头原样保留。
-                     */
-                    out.add(line);
-
-                    continue;
-                }
-
-                /*
-                 * ==============================
-                 * 总开关
-                 * ==============================
-                 *
-                 * enableEquipmentStatOverride
-                 */
-                if (
-                        inEquipmentStat
-                                && trimmed.startsWith(
-                                "enableEquipmentStatOverride"
-                        )
-                ) {
-
-                    String indent =
-                            getIndent(line);
-
-                    out.add(
-                            indent
-                                    + "enableEquipmentStatOverride = true"
-                    );
-
-                    continue;
-                }
-
-                /*
-                 * ==============================
-                 * 装备属性
-                 * ==============================
-                 */
-                if (
-                        inEquipmentStat
-                                && curTier != null
-                                && curJob != null
-                                && curSlot != null
-                ) {
-
-                    int eq =
-                            trimmed.indexOf('=');
-
-                    if (eq > 0) {
-
-                        String key =
-                                trimmed
-                                        .substring(0, eq)
-                                        .trim();
-
-                        /*
-                         * 对应配置键：
-                         *
-                         * tier.job.slot
-                         */
-                        String mapKey =
-                                curTier
-                                        + "."
-                                        + curJob
-                                        + "."
-                                        + curSlot;
-
-                        Map<String, Double> values =
-                                overrides.get(mapKey);
-
-                        /*
-                         * NetCraftConfig 当前保存的是：
-                         *
-                         * [equipment."weapon_knight_t1_mainhand"]
-                         *
-                         * 而 serverconfig 使用：
-                         *
-                         * [equipmentStat.t1.knight.mainhand]
-                         *
-                         * 所以同时支持两种 key。
-                         */
-                        if (values == null) {
-                            String equipmentId =
-                                    buildEquipmentId(curTier, curJob, curSlot);
-                            values = overrides.get(equipmentId);
-                        }
-
-                        if (values != null) {
-
-                            Double value =
-                                    values.get(key);
-
-                            /*
-                             * >= 0 才真正覆盖。
-                             *
-                             * -1 表示保留 NetCraft 原值。
-                             */
-                            if (
-                                    value != null
-                                            && value >= 0
-                            ) {
-
-                                String indent =
-                                        getIndent(line);
-
-                                out.add(
-                                        indent
-                                                + key
-                                                + " = "
-                                                + formatNumber(value)
-                                );
-
-                                writeCount++;
-
-                                continue;
-                            }
-                        }
-                    }
-                }
-
-                /*
-                 * 没有修改的行原样保留。
-                 */
-                out.add(line);
-            }
-
-            /*
-             * 所有值都是 -1，
-             * 不需要修改文件。
-             */
-            if (writeCount == 0) {
-
-                LOGGER.info(
-                        "[NetCraftToolkit] 没有需要写入的装备覆盖值（全部为 -1）。"
+            Map<?, ?> values = getValuesMap(configClass);
+            if (values == null) {
+                LOGGER.error(
+                        "[NetCraftToolkit] 无法取得 NetCraft EquipmentStatConfig.VALUES。"
                 );
-
                 return;
             }
 
-            /*
-             * ==============================
-             * 原子写入
-             * ==============================
-             *
-             * 先写 .tmp
-             * 再替换原文件。
-             */
-            Path tmp =
-                    cfg.resolveSibling(
-                            cfg.getFileName()
-                                    .toString()
-                                    + ".tmp"
+            enableEquipmentOverride(configClass);
+
+            Method configKeyConstructor = configKeyClass.getConstructor(
+                    groupClass,
+                    classTypeClass,
+                    slotClass,
+                    fieldClass
+            );
+
+            int changed = 0;
+            int skipped = 0;
+
+            for (Map.Entry<String, Map<String, Double>> equipmentEntry
+                    : overrides.entrySet()) {
+
+                String equipmentId = equipmentEntry.getKey();
+                Map<String, Double> properties = equipmentEntry.getValue();
+
+                if (properties == null || properties.isEmpty()) {
+                    continue;
+                }
+
+                Matcher matcher = EQUIPMENT_ID_PATTERN.matcher(
+                        equipmentId == null ? "" : equipmentId
+                );
+
+                if (!matcher.matches()) {
+                    LOGGER.debug(
+                            "[NetCraftToolkit] 跳过无法映射到 NetCraft EquipmentStatConfig 的装备：{}",
+                            equipmentId
+                    );
+                    skipped++;
+                    continue;
+                }
+
+                String className = matcher.group(1).toUpperCase(Locale.ROOT);
+                String tierName = matcher.group(2).toLowerCase(Locale.ROOT);
+                String slotCode = matcher.group(3).toLowerCase(Locale.ROOT);
+
+                Object group = Enum.valueOf(
+                        asEnumClass(groupClass),
+                        groupName(tierName)
+                );
+
+                Object classType = Enum.valueOf(
+                        asEnumClass(classTypeClass),
+                        className
+                );
+
+                Object slot = Enum.valueOf(
+                        asEnumClass(slotClass),
+                        slotName(slotCode)
+                );
+
+                for (Map.Entry<String, Double> property
+                        : properties.entrySet()) {
+
+                    String propertyName = property.getKey();
+                    Double number = property.getValue();
+
+                    if (number == null || number < 0D) {
+                        // -1 = 保留 NetCraft 原值
+                        continue;
+                    }
+
+                    String fieldName = fieldName(propertyName);
+                    if (fieldName == null) {
+                        LOGGER.debug(
+                                "[NetCraftToolkit] 跳过未知装备属性：{}.{}",
+                                equipmentId,
+                                propertyName
+                        );
+                        skipped++;
+                        continue;
+                    }
+
+                    Object field = Enum.valueOf(
+                            asEnumClass(fieldClass),
+                            fieldName
                     );
 
-            Files.write(
-                    tmp,
-                    out,
-                    StandardCharsets.UTF_8
-            );
+                    Object configKey = configKeyConstructor.newInstance(
+                            group,
+                            classType,
+                            slot,
+                            field
+                    );
 
-            Files.move(
-                    tmp,
-                    cfg,
-                    StandardCopyOption.REPLACE_EXISTING
-            );
+                    Object configValue = values.get(configKey);
+
+                    if (configValue == null) {
+                        LOGGER.warn(
+                                "[NetCraftToolkit] NetCraft 没有对应装备配置项：{} / {}",
+                                equipmentId,
+                                propertyName
+                        );
+                        skipped++;
+                        continue;
+                    }
+
+                    int intValue = toInteger(number);
+
+                    if (setConfigValue(configValue, intValue)) {
+                        saveConfigValue(configValue);
+                        changed++;
+
+                        LOGGER.info(
+                                "[NetCraftToolkit] 装备热加载：{} -> {} = {}",
+                                equipmentId,
+                                propertyName,
+                                intValue
+                        );
+                    } else {
+                        skipped++;
+                    }
+                }
+            }
 
             LOGGER.info(
-                    "[NetCraftToolkit] 已写入 NetCraft 装备覆盖，共 {} 项 -> {}",
-                    writeCount,
-                    cfg
+                    "[NetCraftToolkit] NetCraft 装备热加载完成：修改 {} 项，跳过 {} 项。",
+                    changed,
+                    skipped
             );
 
-        } catch (IOException e) {
-
+        } catch (ClassNotFoundException e) {
+            LOGGER.warn(
+                    "[NetCraftToolkit] 未找到 NetCraft EquipmentStatConfig，装备热加载未执行。请确认 NetCraft 1.4.18 已加载。"
+            );
+        } catch (Throwable e) {
             LOGGER.error(
-                    "[NetCraftToolkit] 写入 NetCraft serverconfig 失败",
+                    "[NetCraftToolkit] NetCraft 装备热加载失败。",
                     e
             );
         }
     }
 
-    /**
-     * 根据 serverconfig 的 tier/job/slot 反向匹配
-     * NetCraftConfig 中的 equipment ID。
-     */
-    private static String buildEquipmentId(
-            String tier,
-            String job,
-            String slot
-    ) {
-        if (tier == null || job == null || slot == null) {
+    /** 读取 EquipmentStatConfig 中私有的 VALUES。 */
+    private static Map<?, ?> getValuesMap(Class<?> configClass)
+            throws ReflectiveOperationException {
+
+        Field valuesField = configClass.getDeclaredField("VALUES");
+        valuesField.setAccessible(true);
+
+        Object value = valuesField.get(null);
+        if (!(value instanceof Map<?, ?> map)) {
             return null;
         }
 
-        String prefix =
-                isMainHandOrOffHand(slot)
-                        ? "weapon_"
-                        : "equipment_";
-
-        return prefix + job + "_" + tier + "_" + slot;
+        return map;
     }
 
-    private static boolean isMainHandOrOffHand(String slot) {
-        return "mainhand".equalsIgnoreCase(slot)
-                || "offhand".equalsIgnoreCase(slot);
-    }
+    /** 开启 NetCraft 的装备覆盖总开关。 */
+    private static void enableEquipmentOverride(Class<?> configClass)
+            throws ReflectiveOperationException {
 
-    /**
-     * TOML 数值格式化：
-     * 整数保持整数，小数保留小数部分。
-     */
-    private static String formatNumber(Double value) {
-        if (value == null) {
-            return "0";
+        Field field = configClass.getDeclaredField("ENABLE_OVERRIDE");
+        field.setAccessible(true);
+
+        Object configValue = field.get(null);
+        if (configValue == null) {
+            return;
         }
 
-        if (value.isNaN() || value.isInfinite()) {
-            return "0";
+        if (!setConfigValue(configValue, Boolean.TRUE)) {
+            LOGGER.warn(
+                    "[NetCraftToolkit] 无法开启 NetCraft enableEquipmentStatOverride。"
+            );
+            return;
         }
 
-        if (value.doubleValue() == Math.rint(value.doubleValue())) {
-            return Long.toString(value.longValue());
-        }
-
-        return Double.toString(value);
+        saveConfigValue(configValue);
     }
 
     /**
-     * 获取一行前面的空格 / Tab 缩进。
+     * 反射调用 Forge ConfigValue.set(...).
+     * 不把 Forge ConfigValue 写进本类类型签名，避免版本耦合。
      */
-    private static String getIndent(String line) {
+    private static boolean setConfigValue(
+            Object configValue,
+            Object value
+    ) {
+        try {
+            Method setMethod = findOneArgumentMethod(
+                    configValue.getClass(),
+                    "set"
+            );
 
-        int index = 0;
+            if (setMethod == null) {
+                LOGGER.warn(
+                        "[NetCraftToolkit] 找不到 ConfigValue.set(...)：{}",
+                        configValue.getClass().getName()
+                );
+                return false;
+            }
 
-        while (
-                index < line.length()
-                        && Character.isWhitespace(
-                        line.charAt(index)
-                )
-        ) {
+            setMethod.setAccessible(true);
+            setMethod.invoke(configValue, value);
+            return true;
 
-            index++;
+        } catch (Throwable e) {
+            LOGGER.error(
+                    "[NetCraftToolkit] ConfigValue.set(...) 调用失败。",
+                    e
+            );
+            return false;
+        }
+    }
+
+    /** 持久化 ConfigValue。 */
+    private static void saveConfigValue(Object configValue) {
+        try {
+            Method saveMethod = findNoArgumentMethod(
+                    configValue.getClass(),
+                    "save"
+            );
+
+            if (saveMethod == null) {
+                return;
+            }
+
+            saveMethod.setAccessible(true);
+            saveMethod.invoke(configValue);
+
+        } catch (Throwable e) {
+            LOGGER.warn(
+                    "[NetCraftToolkit] ConfigValue.save() 调用失败。",
+                    e
+            );
+        }
+    }
+
+    private static Method findOneArgumentMethod(
+            Class<?> type,
+            String name
+    ) {
+        Class<?> current = type;
+
+        while (current != null) {
+            for (Method method : current.getDeclaredMethods()) {
+                if (method.getName().equals(name)
+                        && method.getParameterCount() == 1) {
+                    return method;
+                }
+            }
+            current = current.getSuperclass();
         }
 
-        return line.substring(0, index);
+        return null;
+    }
+
+    private static Method findNoArgumentMethod(
+            Class<?> type,
+            String name
+    ) {
+        Class<?> current = type;
+
+        while (current != null) {
+            for (Method method : current.getDeclaredMethods()) {
+                if (method.getName().equals(name)
+                        && method.getParameterCount() == 0) {
+                    return method;
+                }
+            }
+            current = current.getSuperclass();
+        }
+
+        return null;
+    }
+
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    private static Class<? extends Enum> asEnumClass(Class<?> type) {
+        return (Class<? extends Enum>) type;
+    }
+
+    private static String groupName(String tierName) {
+        if (tierName.startsWith("legend")) {
+            return "LEGEND" + tierName.substring("legend".length());
+        }
+
+        return "TIER" + tierName.substring(1);
+    }
+
+    private static String slotName(String slotCode) {
+        return switch (slotCode) {
+            case "mhand" -> "MAINHAND";
+            case "hand" -> "OFFHAND";
+            case "1" -> "HELMET";
+            case "2" -> "CHESTPLATE";
+            case "3" -> "LEGGINGS";
+            case "4" -> "BOOTS";
+            default -> throw new IllegalArgumentException(
+                    "Unknown NetCraft equipment slot: " + slotCode
+            );
+        };
+    }
+
+    private static String fieldName(String propertyName) {
+        if (propertyName == null) {
+            return null;
+        }
+
+        return switch (propertyName.trim().toLowerCase(Locale.ROOT)) {
+            case "meleedamage" -> "MELEE_DAMAGE";
+            case "rangeddamage" -> "RANGED_DAMAGE";
+            case "magicdamage" -> "MAGIC_DAMAGE";
+            case "physicaldefense" -> "PHYSICAL_DEFENSE";
+            case "magicdefense" -> "MAGIC_DEFENSE";
+            case "health" -> "HEALTH";
+            case "armor" -> "ARMOR";
+            default -> null;
+        };
+    }
+
+    private static int toInteger(double value) {
+        if (value >= Integer.MAX_VALUE) {
+            return Integer.MAX_VALUE;
+        }
+
+        if (value <= Integer.MIN_VALUE) {
+            return Integer.MIN_VALUE;
+        }
+
+        return (int) Math.round(value);
     }
 }
