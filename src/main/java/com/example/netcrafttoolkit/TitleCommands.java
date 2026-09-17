@@ -8,9 +8,8 @@ import net.minecraft.server.level.ServerPlayer;
 import net.minecraftforge.event.RegisterCommandsEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 
-/** 称号指令：管理指令仅 OP 可用，玩家自己的称号通过 /mytitle GUI 管理。 */
+/** 称号指令。 */
 public class TitleCommands {
-
     private final TitleManager manager;
 
     public TitleCommands(TitleManager manager) {
@@ -20,14 +19,11 @@ public class TitleCommands {
     @SubscribeEvent
     public void onRegisterCommands(RegisterCommandsEvent event) {
         event.getDispatcher().register(
-                Commands.literal("mytitle")
-                        .executes(ctx -> {
-                            if (!(ctx.getSource().getEntity() instanceof ServerPlayer player)) {
-                                return 0;
-                            }
-                            TitleMenu.open(player);
-                            return 1;
-                        })
+                Commands.literal("mytitle").executes(ctx -> {
+                    if (!(ctx.getSource().getEntity() instanceof ServerPlayer player)) return 0;
+                    open(player);
+                    return 1;
+                })
         );
 
         event.getDispatcher().register(
@@ -80,5 +76,22 @@ public class TitleCommands {
                                 )
                         )
         );
+    }
+
+    private void open(ServerPlayer player) {
+        java.util.List<String> ids = new java.util.ArrayList<>();
+        java.util.List<String> texts = new java.util.ArrayList<>();
+        for (String id : manager.getOwnedTitles(player.getUUID())) {
+            String text = manager.getTitleText(id);
+            if (text != null) {
+                ids.add(id);
+                texts.add(text);
+            }
+        }
+        ModNetwork.sendToPlayer(player, new OpenTitleScreenPacket(
+                ids, texts,
+                manager.getMainTitle(player.getUUID()),
+                manager.getSubTitle(player.getUUID())
+        ));
     }
 }
