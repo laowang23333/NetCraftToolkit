@@ -43,6 +43,11 @@ public class NetCraftToolkit {
      */
     private static TitleCommands titleCommands;
 
+    /**
+     * Mohist 服务器聊天称号处理器。
+     */
+    private static TitleChatEvents titleChatEvents;
+
     public NetCraftToolkit() {
 
         LOGGER.info("========================================");
@@ -50,13 +55,22 @@ public class NetCraftToolkit {
         LOGGER.info("========================================");
 
         /*
-         * 创建三个核心管理器。
+         * 创建核心管理器。
          */
         config = new NetCraftConfig();
         attributeManager = new NetCraftAttributeManager();
         dropManager = new NetCraftDropManager();
         titleManager = new TitleManager();
         titleCommands = new TitleCommands(titleManager);
+
+        /*
+         * 创建服务器聊天称号处理器。
+         *
+         * 这里传入同一个 TitleManager，
+         * 保证聊天显示使用的称号数据
+         * 与称号 GUI、头顶名称、Tab 使用的是同一份数据。
+         */
+        titleChatEvents = new TitleChatEvents(titleManager);
 
         /*
          * 注册炉石菜单自定义网络包。
@@ -87,6 +101,11 @@ public class NetCraftToolkit {
          * 注册称号指令。
          */
         MinecraftForge.EVENT_BUS.register(titleCommands);
+
+        /*
+         * 注册 Mohist 服务器聊天称号事件。
+         */
+        MinecraftForge.EVENT_BUS.register(titleChatEvents);
 
         /*
          * 注册本类事件。
