@@ -6,25 +6,16 @@ import net.minecraft.client.gui.screens.inventory.AbstractContainerScreen;
 import net.minecraft.network.chat.Component;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.entity.player.Inventory;
-import net.minecraft.world.inventory.ClickType;
 import net.minecraft.world.inventory.Slot;
 
 /**
  * 玩家称号 GUI。
  *
- * GUI：
- * - 使用原版 generic_54.png 的 3 排箱子区域 + 玩家背包区域。
- * - “物品栏”标题下移一点，避免压在第三排称号槽上。
+ * 这版只处理两个实际问题：
+ * 1. “物品栏”标题下移一点。
+ * 2. 点击/悬停使用 Minecraft 已经计算好的实际 Slot。
  *
- * 点击：
- * - 不依赖屏幕坐标。
- * - 直接使用 AbstractContainerScreen 已经识别出的实际 Slot。
- * - 称号槽左键 -> 主称号。
- * - 称号槽右键 -> 副称号。
- * - 清除主/副称号按钮左右键均发送操作。
- *
- * 这对 FCL/Android 的 GUI 缩放尤其重要：
- * 不再自己用 mouseX/mouseY 计算槽位。
+ * 不再自己用屏幕坐标换算，避免 FCL/Android GUI 缩放导致点击偏移。
  */
 public class TitleScreen extends AbstractContainerScreen<TitleMenu> {
 
@@ -39,13 +30,8 @@ public class TitleScreen extends AbstractContainerScreen<TitleMenu> {
     private static final int CLEAR_MAIN_SLOT = 20;
     private static final int CLEAR_SUB_SLOT = 24;
 
-    /** 3 排 ChestMenu 的容器区域。 */
     private static final int CONTAINER_HEIGHT = 71;
-
-    /** generic_54.png 中玩家物品栏区域的纹理 Y。 */
     private static final int PLAYER_INVENTORY_TEXTURE_Y = 126;
-
-    /** 玩家物品栏 + 快捷栏区域。 */
     private static final int PLAYER_INVENTORY_HEIGHT = 96;
 
     public TitleScreen(
@@ -55,12 +41,11 @@ public class TitleScreen extends AbstractContainerScreen<TitleMenu> {
     ) {
         super(menu, inventory, title);
 
-        // 3 排 ChestMenu 的标准整体高度。
         this.imageWidth = 176;
         this.imageHeight = 168;
 
-        // 原来 61 会压在第三排称号槽上；下移到 70。
-        this.inventoryLabelY = 70;
+        // 只下移“物品栏”文字，其他 GUI 坐标不动。
+        this.inventoryLabelY = 73;
 
         this.titleLabelX = 8;
         this.titleLabelY = 6;
@@ -73,7 +58,6 @@ public class TitleScreen extends AbstractContainerScreen<TitleMenu> {
             int mouseX,
             int mouseY
     ) {
-        // 自定义容器需要主动绘制暗背景。
         this.renderBackground(graphics);
 
         RenderSystem.setShaderColor(
@@ -83,10 +67,7 @@ public class TitleScreen extends AbstractContainerScreen<TitleMenu> {
                 1.0F
         );
 
-        /*
-         * 只取 generic_54 的前三排箱子区域。
-         * 绝不把整张 6 排箱子贴图直接画进来。
-         */
+        // 3 排箱子区域。
         graphics.blit(
                 CHEST_TEXTURE,
                 leftPos,
@@ -99,9 +80,7 @@ public class TitleScreen extends AbstractContainerScreen<TitleMenu> {
                 256
         );
 
-        /*
-         * 接上 generic_54 的玩家物品栏/快捷栏区域。
-         */
+        // 玩家物品栏 + 快捷栏区域。
         graphics.blit(
                 CHEST_TEXTURE,
                 leftPos,
@@ -116,36 +95,98 @@ public class TitleScreen extends AbstractContainerScreen<TitleMenu> {
     }
 
     /**
-     * Minecraft 已经根据实际 GUI 缩放找到了 Slot 后，
-     * 在这里接管称号操作。
+     * 强制补绘 Slot 提示。
      *
-     * 这是点击修复的关键：不再依赖自己计算 mouseX/mouseY。
+     * 正常情况下 AbstractContainerScreen 会自己绘制 tooltip。
+     * 这里再明确绘制一次称号槽提示，确保 FCL/Android 环境下
+     * 鼠标/触摸悬停时仍然能看到称号名称。
      */
     @Override
-    protected void slotClicked(
-            Slot slot,
-            int slotId,
-            int mouseButton,
-            ClickType clickType
+    public void render(
+            GuiGraphics graphics,
+            int mouseX,
+            int mouseY,
+            float partialTick
     ) {
-        if (isActionSlot(slotId)
-                && (mouseButton == 0 || mouseButton == 1)) {
+        super.render(
+                graphics,
+                mouseX,
+                mouseY,
+                partialTick
+        );
+
+        Slot hovered = null;
+
+        for (Slot slot : menu.slots) {
+            if (isActionSlot(slot.index)
+                    && isHovering(slot, mouseX, mouseY)
+                    && slot.hasItem()) {
+                hovered = slot;
+                break;
+            }
+        }
+
+        if (hovered != null) {
+            graphics.renderTooltip(
+                    this.font,
+                    hovered.getItem(),
+                    mouseX,
+                    mouseY
+            );
+        }
+    }
+
+    /**
+     * 直接使用 AbstractContainerScreen 的实际 Slot 命中检测。
+     *
+     * 不使用 mouseX/mouseY + leftPos/topPos 自己计算，
+     * 因此 GUI 缩放不会让点击位置和 Slot 错位。
+     */
+    @Override
+    public boolean mouseClicked(
+            double mouseX,
+            double mouseY,
+            int button
+    ) {
+        if (button != 0 && button != 1) {
+            return super.mouseClicked(
+                    mouseX,
+                    mouseY,
+                    button
+            );
+        }
+
+        for (Slot slot : menu.slots) {
+            if (!isActionSlot(slot.index)) {
+                continue;
+            }
+
+            if (!isHovering(slot, mouseX, mouseY)) {
+                continue;
+            }
+
+            NetCraftToolkit.LOGGER.info(
+                    "[NetCraftToolkit] 客户端称号点击: slot={}, button={}, hasItem={}",
+                    slot.index,
+                    button,
+                    slot.hasItem()
+            );
 
             ModNetwork.sendToServer(
                     new TitleActionPacket(
-                            slotId,
-                            mouseButton == 1
+                            slot.index,
+                            button == 1
                     )
             );
 
-            return;
+            // 明确消费这个点击，不让原版物品搬运流程继续。
+            return true;
         }
 
-        super.slotClicked(
-                slot,
-                slotId,
-                mouseButton,
-                clickType
+        return super.mouseClicked(
+                mouseX,
+                mouseY,
+                button
         );
     }
 
