@@ -1,6 +1,7 @@
 package com.example.netcrafttoolkit;
 
 import com.mojang.blaze3d.systems.RenderSystem;
+import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.screens.inventory.AbstractContainerScreen;
 import net.minecraft.network.chat.Component;
@@ -11,13 +12,16 @@ import net.minecraft.world.inventory.Slot;
 /**
  * 玩家称号 GUI。
  *
- * 1. 物品栏文字稍微下移。
- * 2. 背景严格按 3 排 ChestMenu 裁剪。
- * 3. 点击直接按实际 Slot 坐标处理并发送 TitleActionPacket。
- * 4. 悬停直接按实际 Slot 坐标绘制 ItemStack tooltip。
+ * 重点：
+ * FCL/Android 某些输入层会把 Screen 收到的 mouseX/mouseY
+ * 当成窗口像素坐标，而 Minecraft GUI 的 Slot 坐标是
+ * GUI-scaled 坐标。两者不一致时会同时导致：
  *
- * 注意：这里不使用 AbstractContainerScreen.isHovering(Slot,...)
- * 因为 Forge 1.20.1 该方法的签名不是 Slot 版本。
+ * 1. 点击称号完全没反应；
+ * 2. 悬停 tooltip 完全不出现。
+ *
+ * 因此这里统一从 Minecraft MouseHandler 取得原始窗口坐标，
+ * 再按照当前 Window 的 GUI 缩放比例转换成 Minecraft GUI 坐标。
  */
 public class TitleScreen extends AbstractContainerScreen<TitleMenu> {
 
@@ -46,7 +50,7 @@ public class TitleScreen extends AbstractContainerScreen<TitleMenu> {
         this.imageWidth = 176;
         this.imageHeight = 168;
 
-        // “物品栏”下移一点。
+        // 只把“物品栏”标题下移一点。
         this.inventoryLabelY = 70;
 
         this.titleLabelX = 8;
@@ -69,7 +73,7 @@ public class TitleScreen extends AbstractContainerScreen<TitleMenu> {
                 1.0F
         );
 
-        // 只绘制 3 排箱子区域。
+        // 3 排箱子区域。
         graphics.blit(
                 CHEST_TEXTURE,
                 leftPos,
@@ -82,7 +86,7 @@ public class TitleScreen extends AbstractContainerScreen<TitleMenu> {
                 256
         );
 
-        // 接上玩家背包区域。
+        // 玩家背包 + 快捷栏区域。
         graphics.blit(
                 CHEST_TEXTURE,
                 leftPos,
@@ -103,29 +107,24 @@ public class TitleScreen extends AbstractContainerScreen<TitleMenu> {
             int mouseY,
             float partialTick
     ) {
-        super.render(
-                graphics,
-                mouseX,
-                mouseY,
-                partialTick
-        );
+        super.render(graphics, mouseX, mouseY, partialTick);
 
-        /*
-         * AbstractContainerScreen 的通用 tooltip 在部分 FCL
-         * 环境下没有稳定命中我们的自定义 LockedSlot。
-         * 这里使用实际 Slot 的 x/y 坐标补绘称号物品 tooltip。
-         */
+        // 不信任 FCL 传进来的 mouseX/mouseY，使用真实窗口鼠标位置。
+        double[] guiMouse = getGuiMouse();
+        double guiX = guiMouse[0];
+        double guiY = guiMouse[1];
+
         for (Slot slot : menu.slots) {
             if (!isActionSlot(slot.index) || !slot.hasItem()) {
                 continue;
             }
 
-            if (isInsideSlot(slot, mouseX, mouseY)) {
+            if (isInsideSlot(slot, guiX, guiY)) {
                 graphics.renderTooltip(
                         this.font,
                         slot.getItem(),
-                        mouseX,
-                        mouseY
+                        (int) guiX,
+                        (int) guiY
                 );
                 break;
             }
@@ -139,27 +138,30 @@ public class TitleScreen extends AbstractContainerScreen<TitleMenu> {
             int button
     ) {
         if (button == 0 || button == 1) {
+            double[] guiMouse = getGuiMouse();
+            double guiX = guiMouse[0];
+            double guiY = guiMouse[1];
+
             for (Slot slot : menu.slots) {
                 if (!isActionSlot(slot.index)) {
                     continue;
                 }
 
-                if (!isInsideSlot(slot, mouseX, mouseY)) {
+                if (!isInsideSlot(slot, guiX, guiY)) {
                     continue;
                 }
 
                 NetCraftToolkit.LOGGER.info(
-                        "[NetCraftToolkit] 客户端称号点击: slot={}, button={}, hasItem={}",
+                        "[NetCraftToolkit] 称号GUI点击命中: slot={}, button={}, guiMouse=({},{}), screenMouse=({},{}), hasItem={}",
                         slot.index,
                         button,
+                        guiX,
+                        guiY,
+                        mouseX,
+                        mouseY,
                         slot.hasItem()
                 );
 
-                /*
-                 * 这里直接发送服务端操作包。
-                 * 不调用 super.mouseClicked，避免原版容器把称号物品
-                 * 当普通物品进行拿取/交换。
-                 */
                 ModNetwork.sendToServer(
                         new TitleActionPacket(
                                 slot.index,
@@ -171,11 +173,41 @@ public class TitleScreen extends AbstractContainerScreen<TitleMenu> {
             }
         }
 
-        return super.mouseClicked(
-                mouseX,
-                mouseY,
-                button
-        );
+        return super.mouseClicked(mouseX, mouseY, button);
+    }
+
+    /**
+     * 将窗口像素坐标转换为 Minecraft 当前 GUI-scaled 坐标。
+     *
+     * 例如 1536x691 窗口、GUI 宽度 512 时：
+     * rawX 750 -> GUI X 250。
+     *
+     * 这正是 FCL/Android 输入层容易出错的地方。
+     */
+    private double[] getGuiMouse() {
+        Minecraft minecraft = Minecraft.getInstance();
+
+        double rawX = minecraft.mouseHandler.xpos();
+        double rawY = minecraft.mouseHandler.ypos();
+
+        double windowWidth =
+                minecraft.getWindow().getWidth();
+        double windowHeight =
+                minecraft.getWindow().getHeight();
+
+        double guiWidth =
+                minecraft.getWindow().getGuiScaledWidth();
+        double guiHeight =
+                minecraft.getWindow().getGuiScaledHeight();
+
+        if (windowWidth <= 0 || windowHeight <= 0) {
+            return new double[] { rawX, rawY };
+        }
+
+        return new double[] {
+                rawX * guiWidth / windowWidth,
+                rawY * guiHeight / windowHeight
+        };
     }
 
     private boolean isInsideSlot(
