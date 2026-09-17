@@ -6,41 +6,54 @@ import net.minecraft.client.gui.screens.inventory.AbstractContainerScreen;
 import net.minecraft.network.chat.Component;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.entity.player.Inventory;
-import net.minecraft.world.inventory.ClickType;
-import net.minecraft.world.inventory.Slot;
 
 /**
  * 玩家称号 GUI 客户端界面。
  *
- * 视觉：
- * - 使用 3 行箱子 GUI 的标准高度 166，避免把 generic_54 的第 4~6 排
- *   当成称号 GUI 的空槽显示出来。
+ * 这里故意不拦截 mouseClicked / slotClicked。
+ * Minecraft 原版的 AbstractContainerScreen 点击流程会正常把
+ * 容器点击发送到服务端，而 TitleMenu.clicked() 已经负责真正的
+ * 主/副称号处理。
  *
- * 点击：
- * - 不再自己计算屏幕像素坐标。
- * - 直接接管 AbstractContainerScreen 已经识别出的 Slot 点击。
- * - 左键 = 主称号，右键 = 副称号。
- * - 清除主/副称号也走同一个网络包。
+ * 背景也按原版 ContainerScreen 的方式裁剪 generic_54.png：
+ * 只显示 3 排箱子区域 + 玩家背包区域，
+ * 不再把 generic_54 的 6 排箱子纹理直接画进 3 排菜单。
  */
 public class TitleScreen extends AbstractContainerScreen<TitleMenu> {
 
     private static final ResourceLocation CHEST_TEXTURE =
-            new ResourceLocation("minecraft", "textures/gui/container/generic_54.png");
+            new ResourceLocation(
+                    "minecraft",
+                    "textures/gui/container/generic_54.png"
+            );
 
-    private static final int FIRST_TITLE_SLOT = 9;
-    private static final int LAST_TITLE_SLOT = 17;
-    private static final int CLEAR_MAIN_SLOT = 20;
-    private static final int CLEAR_SUB_SLOT = 24;
+    /** 3 排容器本体：3 * 18 + 17。 */
+    private static final int CONTAINER_HEIGHT = 71;
 
-    public TitleScreen(TitleMenu menu, Inventory inventory, Component title) {
+    /** generic_54.png 中玩家背包区域的起始 Y。 */
+    private static final int PLAYER_INVENTORY_TEXTURE_Y = 126;
+
+    /** 玩家背包 + 快捷栏区域高度。 */
+    private static final int PLAYER_INVENTORY_HEIGHT = 96;
+
+    public TitleScreen(
+            TitleMenu menu,
+            Inventory inventory,
+            Component title
+    ) {
         super(menu, inventory, title);
 
-        // 3 行箱子 + 玩家背包/快捷栏的标准 GUI 高度。
+        /*
+         * 3 排 ChestMenu 的标准尺寸。
+         * 168 = 114 + 3 * 18
+         */
         this.imageWidth = 176;
-        this.imageHeight = 166;
+        this.imageHeight = 168;
 
-        // ChestMenu 3 行时，玩家物品栏标题位于这里。
-        this.inventoryLabelY = 70;
+        /*
+         * ChestScreen 3 排时玩家物品栏标题的标准位置。
+         */
+        this.inventoryLabelY = 61;
 
         this.titleLabelX = 8;
         this.titleLabelY = 6;
@@ -53,8 +66,27 @@ public class TitleScreen extends AbstractContainerScreen<TitleMenu> {
             int mouseX,
             int mouseY
     ) {
-        RenderSystem.setShaderColor(1.0F, 1.0F, 1.0F, 1.0F);
+        /*
+         * 1.20.1 的 AbstractContainerScreen 背景流程中，
+         * 自定义容器背景需要先画屏幕暗背景。
+         * 这样也消除“GUI did not draw the dark background layer”警告。
+         */
+        this.renderBackground(graphics);
 
+        RenderSystem.setShaderColor(
+                1.0F,
+                1.0F,
+                1.0F,
+                1.0F
+        );
+
+        /*
+         * 第一段：
+         * generic_54 左上角只取 3 排箱子需要的 176x71。
+         *
+         * 注意这里显式指定 256x256 纹理尺寸，
+         * 因为 generic_54.png 是 256x256 的整张 GUI 贴图。
+         */
         graphics.blit(
                 CHEST_TEXTURE,
                 leftPos,
@@ -62,44 +94,48 @@ public class TitleScreen extends AbstractContainerScreen<TitleMenu> {
                 0,
                 0,
                 imageWidth,
-                imageHeight
+                CONTAINER_HEIGHT,
+                256,
+                256
+        );
+
+        /*
+         * 第二段：
+         * 从 generic_54 的 y=126 开始取玩家背包区域，
+         * 接在 3 排容器背景后面。
+         *
+         * 这样屏幕上实际显示的是：
+         *
+         *   3 排称号槽
+         *   玩家物品栏
+         *   快捷栏
+         *
+         * 而不是把 6 排箱子纹理硬塞进来。
+         */
+        graphics.blit(
+                CHEST_TEXTURE,
+                leftPos,
+                topPos + CONTAINER_HEIGHT,
+                0,
+                PLAYER_INVENTORY_TEXTURE_Y,
+                imageWidth,
+                PLAYER_INVENTORY_HEIGHT,
+                256,
+                256
         );
     }
 
-    /**
-     * 接管已经被 AbstractContainerScreen 定位到的槽位点击。
+    /*
+     * 这里没有重写 mouseClicked() 或 slotClicked()。
      *
-     * 这样不再依赖 mouseX/mouseY 与 GUI 缩放之间的换算，
-     * 手机端/FCL 的 GUI 缩放也不会导致点击坐标偏移。
+     * 点击会走 Minecraft 原版 AbstractContainerScreen -> 菜单点击
+     * 流程，最终由 TitleMenu.clicked() 在服务端处理：
+     *
+     * 左键称号 = 主称号
+     * 右键称号 = 副称号
+     * 清除主/副称号同样由 TitleMenu 处理
+     *
+     * 不再从客户端自行发送 TitleActionPacket，
+     * 避免手机/FCL 触摸输入被我们自己的点击拦截逻辑吞掉。
      */
-    @Override
-    protected void slotClicked(
-            Slot slot,
-            int slotId,
-            int mouseButton,
-            ClickType clickType
-    ) {
-        if (slot != null
-                && isActionSlot(slotId)
-                && (mouseButton == 0 || mouseButton == 1)) {
-
-            ModNetwork.sendToServer(
-                    new TitleActionPacket(slotId, mouseButton == 1)
-            );
-            return;
-        }
-
-        super.slotClicked(
-                slot,
-                slotId,
-                mouseButton,
-                clickType
-        );
-    }
-
-    private static boolean isActionSlot(int slotId) {
-        return (slotId >= FIRST_TITLE_SLOT && slotId <= LAST_TITLE_SLOT)
-                || slotId == CLEAR_MAIN_SLOT
-                || slotId == CLEAR_SUB_SLOT;
-    }
 }
