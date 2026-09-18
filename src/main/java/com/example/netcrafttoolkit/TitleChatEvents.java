@@ -68,12 +68,12 @@ import java.util.regex.Pattern;
   * "gradient:#RRGGBB:#RRGGBB" (gradient:#RRGGBB:#RRGGBB)文字</gradient>
   * 
   * 支持多个颜色节点。
-    /
+    */
     private static final Pattern GRADIENT_PATTERN =
-    Pattern.compile(
-    "(?i)"gradient:((?:#[0-9a-f]{6})(?::#[0-9a-f]{6})*)" (gradient:((?:#[0-9a-f]{6})(?::#[0-9a-f]{6})*))(.?)</gradient>",
-    Pattern.DOTALL
-    );
+            Pattern.compile(
+                    "(?i)<gradient:((?:#[0-9a-f]{6})(?::#[0-9a-f]{6})*)>(.*?)</gradient>",
+                    Pattern.DOTALL
+            );
   
   public TitleChatEvents(
   TitleManager titleManager
